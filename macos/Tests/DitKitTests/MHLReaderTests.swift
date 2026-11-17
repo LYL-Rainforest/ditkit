@@ -183,4 +183,39 @@ final class MHLReaderTests: XCTestCase {
         XCTAssertEqual(HashAlgorithm(mhlTag: "MD5"), .md5)
         XCTAssertNil(HashAlgorithm(mhlTag: "sha1"))
     }
+
+    /// 清单来自外部文件：../ 穿越、绝对路径、空路径都必须被拒绝，不能读取目录外的文件。
+    func testSafeURLRejectsPathTraversal() {
+        let base = URL(fileURLWithPath: "/tmp/ditkit-mhl-root")
+        XCTAssertNotNil(MHLVerifier.safeURL(for: "sub/a.txt", under: base))
+        XCTAssertNil(MHLVerifier.safeURL(for: "../secret.txt", under: base))
+        XCTAssertNil(MHLVerifier.safeURL(for: "sub/../../secret.txt", under: base))
+        XCTAssertNil(MHLVerifier.safeURL(for: "/etc/passwd", under: base))
+        XCTAssertNil(MHLVerifier.safeURL(for: "", under: base))
+        XCTAssertNil(MHLVerifier.safeURL(for: "C:\\windows\\system32", under: base))
+    }
+
+    /// 通过真实清单校验验证穿越条目被标为 .failed，而不是去读目录外文件。
+    func testVerifyRejectsTraversalEntry() async throws {
+        let fm = FileManager.default
+        let tmp = fm.temporaryDirectory.appendingPathComponent("DitKitTraversal_\(UUID().uuidString)")
+        defer { try? fm.removeItem(at: tmp) }
+        try fm.createDirectory(at: tmp, withIntermediateDirectories: true)
+        let outside = tmp.deletingLastPathComponent().appendingPathComponent("ditkit_outside_\(UUID().uuidString).txt")
+        defer { try? fm.removeItem(at: outside) }
+        try "secret".write(to: outside, atomically: true, encoding: .utf8)
+        let (hash, size) = try await FileHasher.hash(fileAt: outside, algorithm: .xxHash128)
+
+        let url = try MHLReport.write(
+            entries: [.init(path: "../" + outside.lastPathComponent, size: size,
+                            algorithm: "xxh128", hashValue: hash)],
+            process: "transfer", directory: tmp, filePrefix: "DitKit_穿越测试",
+            startedAt: Date(), finishedAt: Date()
+        )
+        let document = try MHLReader.read(url)
+        let rows = await MHLVerifier.verify(document)
+        XCTAssertEqual(rows.count, 1)
+        XCTAssertEqual(rows[0].status, .failed, "穿越条目应被拒绝而不是读取目录外文件")
+        XCTAssertTrue(rows[0].detail.contains("路径非法"))
+    }
 }

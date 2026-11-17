@@ -30,7 +30,7 @@ final class MHLReportTests: XCTestCase {
         XCTAssertTrue(xml.hasPrefix("<?xml version=\"1.0\" encoding=\"UTF-8\"?>"))
         XCTAssertTrue(xml.contains("<hashlist version=\"2.0\" xmlns=\"urn:ASC:MHL:v2.0\">"))
         XCTAssertTrue(xml.contains("<creatorinfo>"))
-        XCTAssertTrue(xml.contains("<tool version=\"0.2.0\">DitKit</tool>"))
+        XCTAssertTrue(xml.contains("<tool version=\"0.2.1\">DitKit</tool>"))
         XCTAssertTrue(xml.contains("<process>transfer</process>"))
         XCTAssertTrue(xml.contains("<path size=\"123\""))
         XCTAssertTrue(xml.contains("<xxh128>0717191e67688313de5f15ab6daf7941</xxh128>"))

@@ -75,16 +75,19 @@ public struct TransferResult: Sendable {
     public var finishedAt: Date
     /// 用户点了「停止」：records 只包含已完成的部分，报告为部分报告。
     public var stopped: Bool
+    /// 报告（MHL/PDF）写入失败的原因；传输本身可能成功，但报告没落盘必须让用户知道。
+    public var reportErrors: [String]
 
     public init(records: [TransferRecord] = [], reportURLs: [URL] = [],
                 errorMessage: String? = nil, startedAt: Date = Date(), finishedAt: Date = Date(),
-                stopped: Bool = false) {
+                stopped: Bool = false, reportErrors: [String] = []) {
         self.records = records
         self.reportURLs = reportURLs
         self.errorMessage = errorMessage
         self.startedAt = startedAt
         self.finishedAt = finishedAt
         self.stopped = stopped
+        self.reportErrors = reportErrors
     }
 
     public var copied:  Int { records.filter { $0.action == .copied }.count }

@@ -64,8 +64,11 @@ public enum PDFReport {
         let flexWidth = max(60, (contentWidth - fixedSum) / CGFloat(flexCount))
         let widths: [CGFloat] = columns.map { $0.width > 0 ? $0.width : flexWidth }
 
+        // 先写同目录临时文件，完成后原子替换目标；中断时不会留下半个 PDF，也不会覆盖旧报告。
+        let tmpURL = url.deletingLastPathComponent()
+            .appendingPathComponent(".\(url.lastPathComponent).tmp-\(UUID().uuidString)")
         var mediaBox = CGRect(x: 0, y: 0, width: pageWidth, height: pageHeight)
-        guard let consumer = CGDataConsumer(url: url as CFURL),
+        guard let consumer = CGDataConsumer(url: tmpURL as CFURL),
               let ctx = CGContext(consumer: consumer, mediaBox: &mediaBox, nil)
         else {
             throw NSError(domain: "PDFReport", code: 1,
@@ -193,6 +196,15 @@ public enum PDFReport {
 
         endPage()
         ctx.closePDF()
+
+        // 原子替换：FileManager 先在同目录生成临时文件再 rename，避免半成品覆盖正式报告。
+        let fm = FileManager.default
+        if fm.fileExists(atPath: url.path) {
+            _ = try? fm.replaceItemAt(url, withItemAt: tmpURL, backupItemName: nil,
+                                      options: .usingNewMetadataOnly)
+        } else {
+            try fm.moveItem(at: tmpURL, to: url)
+        }
     }
 
     // MARK: - 排版原语

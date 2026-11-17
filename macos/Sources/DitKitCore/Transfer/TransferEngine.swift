@@ -23,31 +23,46 @@ public enum TransferEngine {
 
         let targets = config.targets
         let progress = ProgressAccumulator(total: estimateTotal(config: config))
+        // 用引用容器承载已完成的记录：即使中途某个文件抛错，之前完成的项也不会丢失。
+        let collected = RecordBox()
 
         do {
             switch config.mode {
             case .copy:
-                result.records = try await runCopy(
+                try await runCopy(
                     sources: config.sources,
                     targets: targets,
                     algorithm: config.algorithm,
                     progress: progress,
                     onProgress: onProgress,
-                    control: control
+                    control: control,
+                    collected: collected
                 )
             case .sync:
-                result.records = try await runSync(
-                    source: config.sources.first!,
+                guard let source = config.sources.first else {
+                    result.errorMessage = "同步模式缺少源目录"
+                    result.records = collected.records
+                    result.finishedAt = Date()
+                    await onProgress(progress.snapshot(phase: "失败"))
+                    return result
+                }
+                try await runSync(
+                    source: source,
                     targets: targets,
                     algorithm: config.algorithm,
                     progress: progress,
                     onProgress: onProgress,
-                    control: control
+                    control: control,
+                    collected: collected
                 )
             }
         } catch {
-            result.errorMessage = error.localizedDescription
+            let done = collected.records.count
+            result.errorMessage = done > 0
+                ? "\(error.localizedDescription)（任务中断，已完成 \(done) 项仍写入报告）"
+                : error.localizedDescription
         }
+        result.records = collected.records
 
         result.stopped = control?.isStopped ?? false
 
@@ -97,24 +112,33 @@ public enum TransferEngine {
                     )
                 }
             )
-            guard let mhlURL = try? MHLReport.write(
-                entries: entries,
-                process: "transfer",
-                directory: target,
-                filePrefix: "DitKit_传输报告_\(config.mode.rawValue)_\(config.algorithm.tag)",
-                startedAt: started,
-                finishedAt: reportFinished,
-                detail: detail
-            ) else { continue }
+            let mhlURL: URL
+            do {
+                mhlURL = try MHLReport.write(
+                    entries: entries,
+                    process: "transfer",
+                    directory: target,
+                    filePrefix: "DitKit_传输报告_\(config.mode.rawValue)_\(config.algorithm.tag)",
+                    startedAt: started,
+                    finishedAt: reportFinished,
+                    detail: detail
+                )
+            } catch {
+                result.reportErrors.append("\(target.lastPathComponent) 的 MHL 报告写入失败：\(error.localizedDescription)")
+                continue
+            }
             result.reportURLs.append(mhlURL)
 
             // 同目录根写一份配套 PDF（人类可读的完整明细表），与 MHL 明细段同源。
-            if let pdfURL = try? writeTransferPDF(
-                records: scoped, mode: config.mode, algorithm: config.algorithm,
-                target: target, mhlURL: mhlURL, startedAt: started,
-                finishedAt: reportFinished, stopped: result.stopped
-            ) {
+            do {
+                let pdfURL = try writeTransferPDF(
+                    records: scoped, mode: config.mode, algorithm: config.algorithm,
+                    target: target, mhlURL: mhlURL, startedAt: started,
+                    finishedAt: reportFinished, stopped: result.stopped
+                )
                 result.reportURLs.append(pdfURL)
+            } catch {
+                result.reportErrors.append("\(target.lastPathComponent) 的 PDF 报告写入失败：\(error.localizedDescription)")
             }
         }
 
@@ -240,10 +264,10 @@ public enum TransferEngine {
         algorithm: HashAlgorithm,
         progress: ProgressAccumulator,
         onProgress: @MainActor (TransferProgress) -> Void,
-        control: RunControl?
-    ) async throws -> [TransferRecord] {
+        control: RunControl?,
+        collected: RecordBox
+    ) async throws {
         let entries = expandSources(sources)
-        var records: [TransferRecord] = []
         let fm = FileManager.default
 
         targetLoop: for target in targets {
@@ -257,13 +281,16 @@ public enum TransferEngine {
 
                 let exists = fm.fileExists(atPath: targetURL.path)
                 let sameSize = exists && FileCopier.fileSize(targetURL) == FileCopier.fileSize(entry.url)
+                // 同大小比对时算出的源哈希，若随后要更新可复用，避免大文件二次读盘。
+                var comparedSourceHash: String?
 
                 if exists, sameSize {
                     // 大小一致 → 再做内容级哈希校验：一致才跳过，不一致则重新复制更新。
                     let sourceHash = try await FileHasher.hash(fileAt: entry.url, algorithm: algorithm).value
+                    comparedSourceHash = sourceHash
                     let targetHash = try await FileHasher.hash(fileAt: targetURL, algorithm: algorithm).value
                     if sourceHash == targetHash {
-                        records.append(.init(
+                        collected.records.append(.init(
                             action: .skipped, relativePath: entry.rel,
                             sourcePath: entry.url.path, targetPath: targetURL.path,
                             size: FileCopier.fileSize(entry.url), algorithm: algorithm.tag,
@@ -279,11 +306,14 @@ public enum TransferEngine {
 
                 if exists { try? fm.removeItem(at: targetURL) }
 
-                let (size, sourceHash) = try await FileCopier.copyAndHashSource(entry.url, to: targetURL, algorithm: algorithm)
+                let (size, sourceHash) = try await FileCopier.copyAndHashSource(
+                    entry.url, to: targetURL, algorithm: algorithm,
+                    knownSourceHash: comparedSourceHash
+                )
                 let targetHash = try await FileHasher.hash(fileAt: targetURL, algorithm: algorithm).value
                 let verified = (sourceHash == targetHash)
                 let action: TransferAction = exists ? .updated : .copied
-                records.append(.init(
+                collected.records.append(.init(
                     action: action, relativePath: entry.rel,
                     sourcePath: entry.url.path, targetPath: targetURL.path,
                     size: size, algorithm: algorithm.tag,
@@ -295,7 +325,6 @@ public enum TransferEngine {
                 await onProgress(progress.snapshot(phase: "复制中"))
             }
         }
-        return records
     }
 
     // MARK: - 同步模式（目标完全对齐源）
@@ -306,10 +335,10 @@ public enum TransferEngine {
         algorithm: HashAlgorithm,
         progress: ProgressAccumulator,
         onProgress: @MainActor (TransferProgress) -> Void,
-        control: RunControl?
-    ) async throws -> [TransferRecord] {
+        control: RunControl?,
+        collected: RecordBox
+    ) async throws {
         let fm = FileManager.default
-        var records: [TransferRecord] = []
 
         // 1) 遍历源，得到全部文件/目录的相对路径（对所有目标共用）。
         let sourceAll = walkAll(in: source, base: source)      // [(rel, url, isDir)]
@@ -330,13 +359,15 @@ public enum TransferEngine {
                 try ensureDir(targetURL.deletingLastPathComponent())
                 let exists = fm.fileExists(atPath: targetURL.path)
                 let sameSize = exists && FileCopier.fileSize(targetURL) == FileCopier.fileSize(item.url)
+                var comparedSourceHash: String?
 
                 if exists, sameSize {
                     // 大小一致 → 再做内容级哈希校验：一致才跳过，不一致则重新同步更新。
                     let sourceHash = try await FileHasher.hash(fileAt: item.url, algorithm: algorithm).value
+                    comparedSourceHash = sourceHash
                     let targetHash = try await FileHasher.hash(fileAt: targetURL, algorithm: algorithm).value
                     if sourceHash == targetHash {
-                        records.append(.init(
+                        collected.records.append(.init(
                             action: .skipped, relativePath: item.rel,
                             sourcePath: item.url.path, targetPath: targetURL.path,
                             size: FileCopier.fileSize(item.url), algorithm: algorithm.tag,
@@ -351,11 +382,14 @@ public enum TransferEngine {
                 }
 
                 if exists { try? fm.removeItem(at: targetURL) }
-                let (size, sourceHash) = try await FileCopier.copyAndHashSource(item.url, to: targetURL, algorithm: algorithm)
+                let (size, sourceHash) = try await FileCopier.copyAndHashSource(
+                    item.url, to: targetURL, algorithm: algorithm,
+                    knownSourceHash: comparedSourceHash
+                )
                 let targetHash = try await FileHasher.hash(fileAt: targetURL, algorithm: algorithm).value
                 let verified = (sourceHash == targetHash)
                 let action: TransferAction = exists ? .updated : .copied
-                records.append(.init(
+                collected.records.append(.init(
                     action: action, relativePath: item.rel,
                     sourcePath: item.url.path, targetPath: targetURL.path,
                     size: size, algorithm: algorithm.tag,
@@ -377,7 +411,7 @@ public enum TransferEngine {
                 if entry.isDir {
                     if !sourceDirRels.contains(entry.rel) {
                         try? fm.removeItem(at: entry.url)
-                        records.append(.init(
+                        collected.records.append(.init(
                             action: .deleted, relativePath: entry.rel,
                             sourcePath: "", targetPath: target.appendingPathComponent(entry.rel).path,
                             size: 0, algorithm: algorithm.tag,
@@ -395,7 +429,7 @@ public enum TransferEngine {
                         let parentRel = (entry.rel as NSString).deletingLastPathComponent
                         if parentRel.isEmpty || !extraDirSet.contains(parentRel) {
                             try? fm.removeItem(at: entry.url)
-                            records.append(.init(
+                            collected.records.append(.init(
                                 action: .deleted, relativePath: entry.rel,
                                 sourcePath: "", targetPath: target.appendingPathComponent(entry.rel).path,
                                 size: FileCopier.fileSize(entry.url), algorithm: algorithm.tag,
@@ -409,8 +443,6 @@ public enum TransferEngine {
                 }
             }
         }
-
-        return records
     }
 
     // MARK: - 目录遍历与工具
@@ -433,8 +465,10 @@ public enum TransferEngine {
             let rv = try? child.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
             let isDir = rv?.isDirectory ?? false
             let isSymlink = rv?.isSymbolicLink ?? false
+            // 符号链接一律跳过：既可能指向目录外造成越界，也无法用普通文件哈希正确处理。
+            if isSymlink { continue }
             let rel = relativePath(of: child, relativeToBasePath: basePath)
-            if isDir, !isSymlink {
+            if isDir {
                 result.append(contentsOf: walkFiles(in: child, basePath: basePath))
             } else {
                 result.append((rel, child))
@@ -458,8 +492,10 @@ public enum TransferEngine {
             let rv = try? child.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
             let isDir = rv?.isDirectory ?? false
             let isSymlink = rv?.isSymbolicLink ?? false
+            // 符号链接不参与同步（不补、不删），避免跟随到目录之外。
+            if isSymlink { continue }
             let rel = relativePath(of: child, relativeToBasePath: basePath)
-            if isDir, !isSymlink {
+            if isDir {
                 result.append((rel, child, true))
                 result.append(contentsOf: walkAll(in: child, basePath: basePath))
             } else {
@@ -518,9 +554,17 @@ public enum TransferEngine {
         case .copy:
             return max(1, expandSources(config.sources).count * config.targets.count)
         case .sync:
-            return max(1, walkFiles(in: config.sources.first!, base: config.sources.first!).count * config.targets.count)
+            // 公开入口可能传入空 sources，不能直接强解包；缺失源时按最小总数处理。
+            guard let source = config.sources.first else { return 1 }
+            return max(1, walkFiles(in: source, base: source).count * config.targets.count)
         }
     }
+}
+
+/// 已完成记录的引用容器。用 class 而非 inout 数组，是因为 `async` 函数不能跨 `await` 持有 `inout`；
+/// 这样中途抛错时调用方仍能拿到已经完成的记录，避免报告变成空清单。
+private final class RecordBox {
+    var records: [TransferRecord] = []
 }
 
 /// 进度累加器：在传输引擎内部累积计数，按需生成 `TransferProgress` 快照。
@@ -541,8 +585,11 @@ private final class ProgressAccumulator {
     }
 
     func snapshot(phase: String) -> TransferProgress {
-        TransferProgress(
-            filesDone: doneCount, filesTotal: total,
+        // 同步模式的删除项也计入 done，可能超过按源文件估算的 total；UI 进度不能超过 100%。
+        let shownDone = min(doneCount, total)
+        let shownTotal = max(total, doneCount)
+        return TransferProgress(
+            filesDone: shownDone, filesTotal: shownTotal,
             currentFile: (current as NSString).lastPathComponent,
             bytesDone: 0, bytesTotal: 0, phase: phase
         )

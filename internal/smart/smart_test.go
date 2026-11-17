@@ -29,6 +29,37 @@ func reportText(r Report) string {
 	return b.String()
 }
 
+// 不提供 overall SMART status 的盘（部分 NVMe / USB），缺失字段不得被当成「未通过」而误报 critical。
+func TestMissingSmartStatusIsNotCritical(t *testing.T) {
+	raw := []byte(`{"smartctl":{"exit_status":0,"version":[7,4]},"model_name":"USB Disk","serial_number":"S1"}`)
+	r, err := BuildReport(testDisk(), raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Status == StatusCritical {
+		t.Fatalf("缺失 smart_status 被误判为 critical: %+v", r)
+	}
+	text := reportText(r)
+	if !strings.Contains(text, "该设备未提供") {
+		t.Fatalf("应明确显示「该设备未提供」，实际: %s", text)
+	}
+	if strings.Contains(text, "SMART 总体自检未通过") {
+		t.Fatalf("不应报「未通过」: %s", text)
+	}
+}
+
+// 明确给出 smart_status.passed=false 时，仍必须判 critical。
+func TestFailedSmartStatusIsCritical(t *testing.T) {
+	raw := []byte(`{"smart_status":{"passed":false},"smartctl":{"exit_status":0}}`)
+	r, err := BuildReport(testDisk(), raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Status != StatusCritical {
+		t.Fatalf("明确未通过应判 critical，实际: %s", r.Status)
+	}
+}
+
 func TestBuildReportFromRealNVMe(t *testing.T) {
 	raw, err := os.ReadFile("../../testdata/smart_nvme.json")
 	if err != nil {

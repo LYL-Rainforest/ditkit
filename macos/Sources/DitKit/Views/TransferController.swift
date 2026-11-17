@@ -30,13 +30,16 @@ final class TransferController {
     var syncConfirmRequested = false
 
     @ObservationIgnored private var control = RunControl()
+    /// 从点击启动到 perform() 真正把 phase 置为 .running 之间存在调度窗口；
+    /// 这个标志在同一同步调用栈里立即占位，杜绝快速双击跑出两个并发任务。
+    @ObservationIgnored private var launchGuard = false
 
     /// 任务仍活着（含暂停），期间禁止改配置或重复启动。
     var isRunning: Bool { phase == .running || phase == .paused }
     var isPaused: Bool { phase == .paused }
 
     var canRun: Bool {
-        guard !isRunning else { return false }
+        guard !isRunning, !launchGuard else { return false }
         if mode == .copy {
             guard !sources.isEmpty else { return false }
             return targetStrings.contains { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
@@ -146,16 +149,20 @@ final class TransferController {
             syncConfirmRequested = true
             return
         }
+        launchGuard = true
         Task { await perform() }
     }
 
     func confirmSync() {
+        guard syncConfirmRequested, canRun else { return }
         syncConfirmRequested = false
+        launchGuard = true
         Task { await perform() }
     }
 
     func cancelSync() {
         syncConfirmRequested = false
+        launchGuard = false
     }
 
     /// 暂停 / 继续切换。控制点在文件边界，当前文件不会被打断。
@@ -195,15 +202,20 @@ final class TransferController {
     }
 
     private func perform() async {
+        // 快照启动瞬间的配置，运行中即便界面控件被改动，本次任务也用同一份配置与统计口径。
+        let runMode = mode
+        let runAlgorithm = algorithm
+        let runSources = sources
         control = RunControl()
         phase = .running
-        message = mode == .copy ? "正在复制（按文件大小分流，≥4MiB 直传）…" : "正在同步…"
+        launchGuard = false
+        message = runMode == .copy ? "正在复制（按文件大小分流，≥4MiB 直传）…" : "正在同步…"
         let validTargets = targetStrings
             .map { $0.trimmingCharacters(in: .whitespaces) }
             .filter { !$0.isEmpty }
             .map { URL(fileURLWithPath: ($0 as NSString).expandingTildeInPath) }
 
-        let config = TransferConfig(mode: mode, algorithm: algorithm, sources: sources, targets: validTargets)
+        let config = TransferConfig(mode: runMode, algorithm: runAlgorithm, sources: runSources, targets: validTargets)
         let onProgress: @MainActor (TransferProgress) -> Void = { [weak self] p in
             guard let self else { return }
             var adjusted = p
@@ -216,20 +228,24 @@ final class TransferController {
         }
         let res = await TransferEngine.execute(config: config, onProgress: onProgress, control: control)
         result = res
+        launchGuard = false
         progress.phase = res.stopped ? "已停止" : "完成"
         let reportNote = res.reportURLs.first.map { "报告：\($0.lastPathComponent)" } ?? ""
+        let reportErrorNote = res.reportErrors.isEmpty
+            ? ""
+            : "　⚠️ 报告写入失败：\(res.reportErrors.joined(separator: "；"))"
         let counts = "复制 \(res.copied) · 更新 \(res.updated) · 跳过 \(res.skipped)" +
-            (mode == .sync ? " · 删除 \(res.deleted)" : "") +
+            (runMode == .sync ? " · 删除 \(res.deleted)" : "") +
             " · 失败 \(res.failed) · 校验通过 \(res.verifiedOK)"
         if let err = res.errorMessage {
             phase = .failed(err)
-            message = "传输出错：\(err)"
+            message = "传输出错：\(err)\(reportErrorNote)"
         } else if res.stopped {
             phase = .stopped
-            message = "已停止 · \(counts) · 已生成部分报告　\(reportNote)"
+            message = "已停止 · \(counts) · 已生成部分报告　\(reportNote)\(reportErrorNote)"
         } else {
             phase = .done
-            message = "完成 · \(counts)　\(reportNote)"
+            message = "完成 · \(counts)　\(reportNote)\(reportErrorNote)"
         }
     }
 }

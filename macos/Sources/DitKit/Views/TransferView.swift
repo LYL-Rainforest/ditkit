@@ -39,12 +39,14 @@ struct TransferView: View {
             }
             .pickerStyle(.segmented)
             .frame(width: 180)
+            .disabled(controller.isRunning)
 
             Picker("校验", selection: $controller.algorithm) {
                 ForEach(HashAlgorithm.allCases) { Text($0.label).tag($0) }
             }
             .pickerStyle(.segmented)
             .frame(width: 180)
+            .disabled(controller.isRunning)
 
             Spacer(minLength: 8)
 

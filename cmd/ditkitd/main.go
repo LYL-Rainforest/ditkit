@@ -58,6 +58,10 @@ func main() {
 
 func randomToken() string {
 	b := make([]byte, 32)
-	_, _ = rand.Read(b)
+	if _, err := rand.Read(b); err != nil {
+		// 令牌生成失败绝不能静默返回全 0 令牌，否则本机鉴权形同虚设。
+		fmt.Fprintln(os.Stderr, "错误: 无法生成安全令牌:", err)
+		os.Exit(1)
+	}
 	return hex.EncodeToString(b)
 }

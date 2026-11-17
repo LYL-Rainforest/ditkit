@@ -10,6 +10,7 @@ final class SpeedTestController {
     enum Phase: Equatable {
         case idle
         case running
+        case cancelling   // 已请求取消，等待后台 IO 真正收尾；此时仍禁止开始新一轮
         case finished
         case cancelled
         case failed(String)
@@ -26,8 +27,11 @@ final class SpeedTestController {
 
     @ObservationIgnored private var cancelFlag: CancelFlag?
     @ObservationIgnored private var task: Task<Void, Never>?
+    /// 每轮测速一个代次；回调写回前校验，防止已取消的旧任务污染新一轮状态。
+    @ObservationIgnored private var generation: UInt64 = 0
 
-    var isRunning: Bool { phase == .running }
+    /// 运行中或正在取消收尾：两者都禁止开始新一轮，避免旧回调覆盖新任务。
+    var isRunning: Bool { phase == .running || phase == .cancelling }
 
     init() {
         // 记住上次选择的目标目录；联调时可用启动参数直接注入目录。
@@ -81,6 +85,8 @@ final class SpeedTestController {
         let config = SpeedTestConfig(size: size, directoryURL: directory)
         let flag = CancelFlag()
         cancelFlag = flag
+        generation &+= 1
+        let gen = generation
 
         phase = .running
         result = nil
@@ -91,27 +97,37 @@ final class SpeedTestController {
                 let value = try await SpeedTestRunner.run(
                     config: config,
                     progress: { item in
-                        Task { @MainActor in self?.progress = item }
+                        // 进度回调用独立 Task 投递到主 actor，必须校验代次，否则取消后仍会写回进度卡。
+                        Task { @MainActor in
+                            guard let self, self.generation == gen else { return }
+                            self.progress = item
+                        }
                     },
                     isCancelled: { flag.isSet }
                 )
-                self?.result = value
-                self?.phase = .finished
+                guard let self, self.generation == gen else { return }
+                self.result = value
+                self.phase = .finished
             } catch let error as SpeedTestError {
-                self?.phase = error == .cancelled ? .cancelled : .failed(error.localizedDescription)
+                guard let self, self.generation == gen else { return }
+                self.phase = error == .cancelled ? .cancelled : .failed(error.localizedDescription)
             } catch {
-                self?.phase = .failed(error.localizedDescription)
+                guard let self, self.generation == gen else { return }
+                self.phase = .failed(error.localizedDescription)
             }
-            self?.progress = nil
-            self?.cancelFlag = nil
-            self?.task = nil
+            guard let self, self.generation == gen else { return }
+            self.progress = nil
+            self.cancelFlag = nil
+            self.task = nil
         }
     }
 
     func cancel() {
-        guard isRunning else { return }
+        guard phase == .running else { return }
         cancelFlag?.set()
-        phase = .cancelled
+        // 保持 isRunning 为真直到后台 IO 收尾回调把 phase 改成 .cancelled，
+        // 期间用户无法再点「开始」，旧任务也不会清掉新一轮的引用。
+        phase = .cancelling
     }
 }
 

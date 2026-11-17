@@ -15,10 +15,13 @@ public enum FileCopier {
 
     /// 复制 `src` → `dst`，并返回源文件哈希。
     /// 调用方需确保 `dst` 的父目录已存在。
+    /// - parameter knownSourceHash: 若调用方已经算过源文件哈希（例如同大小比对时），
+    ///   传入可避免复制过程中再次哈希源文件——大文件因此少一次全量读盘。
     public static func copyAndHashSource(
         _ src: URL,
         to dst: URL,
-        algorithm: HashAlgorithm
+        algorithm: HashAlgorithm,
+        knownSourceHash: String? = nil
     ) async throws -> (size: Int64, sourceHash: String) {
         let size = fileSize(src)
         if size >= 0, size < smallThreshold {
@@ -26,7 +29,8 @@ public enum FileCopier {
             try copySmall(src, to: dst)
             return (size, sourceHash)
         }
-        return try await copyLargeDirect(src, to: dst, algorithm: algorithm)
+        return try await copyLargeDirect(src, to: dst, algorithm: algorithm,
+                                         knownSourceHash: knownSourceHash)
     }
 
     // MARK: - 小文件：系统缓存路径
@@ -46,12 +50,14 @@ public enum FileCopier {
     private static func copyLargeDirect(
         _ src: URL,
         to dst: URL,
-        algorithm: HashAlgorithm
+        algorithm: HashAlgorithm,
+        knownSourceHash: String?
     ) async throws -> (Int64, String) {
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<(Int64, String), Error>) in
             DispatchQueue.global(qos: .userInitiated).async {
                 do {
-                    let result = try performLargeDirect(src, to: dst, algorithm: algorithm)
+                    let result = try performLargeDirect(src, to: dst, algorithm: algorithm,
+                                                        knownSourceHash: knownSourceHash)
                     continuation.resume(returning: result)
                 } catch {
                     continuation.resume(throwing: error)
@@ -63,7 +69,8 @@ public enum FileCopier {
     private static func performLargeDirect(
         _ src: URL,
         to dst: URL,
-        algorithm: HashAlgorithm
+        algorithm: HashAlgorithm,
+        knownSourceHash: String?
     ) throws -> (Int64, String) {
         let srcFD = src.path.withCString { open($0, O_RDONLY) }
         guard srcFD >= 0 else { throw CopyError.openSource(errnoMessage()) }
@@ -81,26 +88,28 @@ public enum FileCopier {
         _ = fcntl(dstFD, F_NOCACHE, 1)
         _ = fcntl(dstFD, F_GLOBAL_NOCACHE, 1)
 
-        let hasher = try IncrementalHasher(algorithm: algorithm)
+        // 已知源哈希时不再创建增量哈希器：数据照常直传，只是不再喂给 hasher，省一次逐块计算。
+        let hasher = knownSourceHash == nil ? try? IncrementalHasher(algorithm: algorithm) : nil
         // 单一缓冲复用：整次复制只分配/释放一次。
         let buffer = UnsafeMutableRawPointer.allocate(byteCount: blockSize, alignment: 4096)
         defer { buffer.deallocate() }
 
         var total: Int64 = 0
         while true {
-            let n = read(srcFD, buffer, blockSize)
+            let n = readWithRetry(srcFD, buffer, blockSize)
             if n < 0 { throw CopyError.read(errnoMessage()) }
             if n == 0 { break }
             var offset = 0
             while offset < n {
-                let w = write(dstFD, buffer.advanced(by: offset), n - offset)
+                let w = writeWithRetry(dstFD, buffer.advanced(by: offset), n - offset)
                 if w < 0 { throw CopyError.write(errnoMessage()) }
+                if w == 0 { throw CopyError.write("写入返回 0 字节，已中止以避免死循环") }
                 offset += w
             }
-            hasher.update(UnsafeRawBufferPointer(start: buffer, count: n))
+            hasher?.update(UnsafeRawBufferPointer(start: buffer, count: n))
             total += Int64(n)
         }
-        let sourceHash = hasher.finalize()
+        let sourceHash = knownSourceHash ?? hasher?.finalize() ?? ""
         // 强制落盘（含 SSD 写缓存），失败回退到 fsync。
         if fcntl(dstFD, F_FULLFSYNC) != 0 { _ = fsync(dstFD) }
         close(dstFD); dstOpen = false
@@ -121,6 +130,24 @@ public enum FileCopier {
 
     private enum CopyError: Error {
         case openSource(String), openDest(String), read(String), write(String)
+    }
+
+    /// 被信号中断（EINTR）时重试 read，其它错误原样返回 -1。
+    private static func readWithRetry(_ fd: Int32, _ buffer: UnsafeMutableRawPointer, _ count: Int) -> Int {
+        while true {
+            let n = read(fd, buffer, count)
+            if n < 0, errno == EINTR { continue }
+            return n
+        }
+    }
+
+    /// 被信号中断时重试 write，其它错误原样返回 -1。
+    private static func writeWithRetry(_ fd: Int32, _ buffer: UnsafeRawPointer, _ count: Int) -> Int {
+        while true {
+            let n = write(fd, buffer, count)
+            if n < 0, errno == EINTR { continue }
+            return n
+        }
     }
 
     private static func errnoMessage() -> String {

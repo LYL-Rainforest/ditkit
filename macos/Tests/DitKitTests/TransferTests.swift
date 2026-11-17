@@ -288,6 +288,93 @@ final class TransferTests: XCTestCase {
         XCTAssertTrue(fm.fileExists(atPath: target.appendingPathComponent("stale.txt").path))
     }
 
+    /// 第二个目标目录无法创建（父路径是普通文件）导致中途抛错时，
+    /// 第一个目标已完成的记录必须保留，报告不能变成空清单。
+    func testMidwayErrorKeepsCompletedRecords() async throws {
+        let fm = FileManager.default
+        let tmp = fm.temporaryDirectory.appendingPathComponent("DitKitMidError_\(UUID().uuidString)")
+        defer { try? fm.removeItem(at: tmp) }
+        try fm.createDirectory(at: tmp, withIntermediateDirectories: true)
+
+        let source = tmp.appendingPathComponent("a.txt")
+        try "hello".write(to: source, atomically: true, encoding: .utf8)
+        let target1 = tmp.appendingPathComponent("target1")
+        // blocker 是文件，blocker/sub 无法作为目录创建 → 处理第二个目标时抛错。
+        let blocker = tmp.appendingPathComponent("blocker")
+        try "not a dir".write(to: blocker, atomically: true, encoding: .utf8)
+        let target2 = blocker.appendingPathComponent("sub")
+
+        let config = TransferConfig(
+            mode: .copy, algorithm: .xxHash128,
+            sources: [source], targets: [target1, target2]
+        )
+        let result = await TransferEngine.execute(config: config, onProgress: { _ in })
+
+        XCTAssertNotNil(result.errorMessage, "应上报第二个目标目录创建失败")
+        XCTAssertEqual(result.records.count, 1, "第一个目标已完成的记录必须保留")
+        XCTAssertEqual(result.records.first?.relativePath, "a.txt")
+        XCTAssertTrue(result.errorMessage?.contains("已完成 1 项") == true,
+                      "错误提示应说明已保留部分结果")
+    }
+
+    /// 大文件同大小但内容不同 → 更新时复用比对阶段的源哈希（跳过二次哈希），
+    /// 结果里的 sourceHash 仍必须正确，且目标内容确实被替换、校验通过。
+    func testLargeUpdateReusesComparedHashCorrectly() async throws {
+        let fm = FileManager.default
+        let tmp = fm.temporaryDirectory.appendingPathComponent("DitKitHashReuse_\(UUID().uuidString)")
+        defer { try? fm.removeItem(at: tmp) }
+        let srcDir = tmp.appendingPathComponent("src")
+        let dstDir = tmp.appendingPathComponent("dst")
+        try fm.createDirectory(at: srcDir, withIntermediateDirectories: true)
+        try fm.createDirectory(at: dstDir, withIntermediateDirectories: true)
+
+        let big = 5 * 1024 * 1024  // ≥ 4 MiB，走直传+哈希复用路径
+        let srcFile = srcDir.appendingPathComponent("big.bin")
+        let dstFile = dstDir.appendingPathComponent("big.bin")
+        try Data(repeating: 0xAB, count: big).write(to: srcFile)
+        try Data(repeating: 0xCD, count: big).write(to: dstFile)  // 同大小、不同内容
+        let expectedHash = try await FileHasher.hash(fileAt: srcFile, algorithm: .xxHash128).value
+
+        let config = TransferConfig(mode: .copy, algorithm: .xxHash128,
+                                    sources: [srcFile], targets: [dstDir])
+        let result = await TransferEngine.execute(config: config, onProgress: { _ in })
+
+        XCTAssertNil(result.errorMessage)
+        XCTAssertEqual(result.records.count, 1)
+        XCTAssertEqual(result.records.first?.action, .updated)
+        XCTAssertEqual(result.records.first?.sourceHash, expectedHash, "复用哈希必须等于真实源哈希")
+        XCTAssertTrue(result.records.first?.verified == true, "更新后源与目标应校验一致")
+        let dstHash = try await FileHasher.hash(fileAt: dstFile, algorithm: .xxHash128).value
+        XCTAssertEqual(dstHash, expectedHash, "目标内容应被替换成源内容")
+    }
+
+    /// 符号链接（无论指向文件还是目录）都不参与传输，避免跟随到目录树外或哈希目录出错。
+    func testWalkFilesSkipsSymlinks() throws {
+        let fm = FileManager.default
+        let tmp = fm.temporaryDirectory.appendingPathComponent("DitKitSymlink_\(UUID().uuidString)")
+        defer { try? fm.removeItem(at: tmp) }
+        try fm.createDirectory(at: tmp, withIntermediateDirectories: true)
+        try "real".write(to: tmp.appendingPathComponent("a.txt"), atomically: true, encoding: .utf8)
+        try fm.createSymbolicLink(at: tmp.appendingPathComponent("link.txt"),
+                                  withDestinationURL: tmp.appendingPathComponent("a.txt"))
+        try fm.createSymbolicLink(at: tmp.appendingPathComponent("linkdir"),
+                                  withDestinationURL: tmp)
+
+        let files = TransferEngine.walkFiles(in: tmp, base: tmp)
+        XCTAssertEqual(files.count, 1)
+        XCTAssertEqual(files.first?.rel, "a.txt")
+
+        let all = TransferEngine.walkAll(in: tmp, base: tmp)
+        XCTAssertEqual(all.count, 1)
+        XCTAssertEqual(all.first?.rel, "a.txt")
+    }
+
+    /// 公开入口传入空 sources 不应崩溃（同步模式旧实现会强解包 first!）。
+    func testEstimateTotalEmptySourcesDoesNotCrash() {
+        let config = TransferConfig(mode: .sync, algorithm: .xxHash128, sources: [], targets: [])
+        XCTAssertEqual(TransferEngine.estimateTotal(config: config), 1)
+    }
+
     // MARK: - 工具
 
     private func makeFile(bytes: [UInt8]) throws -> URL {

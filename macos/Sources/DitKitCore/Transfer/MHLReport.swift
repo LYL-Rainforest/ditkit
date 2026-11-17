@@ -73,7 +73,7 @@ public struct MHLReportDetail: Sendable {
 ///   <creatorinfo>
 ///     <creationdate>ISO8601</creationdate>
 ///     <hostname>…</hostname>
-///     <tool version="0.2.0">DitKit</tool>
+///     <tool version="0.2.1">DitKit</tool>
 ///   </creatorinfo>
 ///   <processinfo>
 ///     <process>transfer|in-place|flatten</process>
@@ -131,7 +131,7 @@ public enum MHLReport {
         filePrefix: String,
         startedAt: Date,
         finishedAt: Date,
-        toolVersion: String = "0.2.0",
+        toolVersion: String = "0.2.1",
         detail: MHLReportDetail? = nil
     ) throws -> URL {
         var xml = """
@@ -164,8 +164,9 @@ public enum MHLReport {
         xml += "\n</hashlist>\n"
 
         let fileURL = directory.appendingPathComponent("\(filePrefix)_\(timestamp(finishedAt)).mhl")
-        cleanPreviousReports(directory: directory, filePrefix: filePrefix)
+        // 先原子落盘新报告，成功后再清理旧报告；避免写失败时连历史清单一起丢失。
         try xml.write(to: fileURL, atomically: true, encoding: .utf8)
+        cleanPreviousReports(directory: directory, filePrefix: filePrefix, except: fileURL)
         return fileURL
     }
 
@@ -234,10 +235,13 @@ public enum MHLReport {
     }
 
     /// 删除目录根中同一前缀的历史报告（.mhl/.pdf），保证每个目标只保留最新一组。
-    public static func cleanPreviousReports(directory: URL, filePrefix: String) {
+    /// - parameter except: 刚写入的新报告，清理时必须跳过，否则会把自己删掉。
+    public static func cleanPreviousReports(directory: URL, filePrefix: String, except: URL? = nil) {
         let fm = FileManager.default
         guard let children = try? fm.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil) else { return }
+        let keep = except?.standardizedFileURL.path
         for child in children {
+            if let keep, child.standardizedFileURL.path == keep { continue }
             let name = child.lastPathComponent
             guard name.hasPrefix(filePrefix + "_") else { continue }
             let ext = child.pathExtension.lowercased()

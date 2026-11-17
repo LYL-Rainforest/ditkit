@@ -40,6 +40,11 @@ public final class IOMonitor {
         self.series = IOSeries(capacity: max(2, cap))
     }
 
+    deinit {
+        // 窗口/视图释放时不要留下每秒空转的 Timer（Timer 对 self 是 weak，但闭包本身仍在跑）。
+        timer?.invalidate()
+    }
+
     public func start() {
         guard !isRunning else { return }
         devices = IOKitCounters.devices()
@@ -54,7 +59,7 @@ public final class IOMonitor {
         isRunning = true
 
         let timer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.tick() }
+            Task { @MainActor in await self?.tick() }
         }
         timer.tolerance = interval * 0.1
         self.timer = timer
@@ -109,9 +114,18 @@ public final class IOMonitor {
         errorMessage = hasCounters ? nil : "所选磁盘未提供 IOKit 统计计数器"
     }
 
-    private func tick() {
-        let snapshots = IOKitCounters.snapshot()
-        let nowAt = Date()
+    /// 在后台线程遍历 IORegistry，避免每秒一次的同步采样阻塞主线程 UI。
+    private nonisolated func fetchCounters() async -> ([IODeviceSnapshot], Date) {
+        let now = Date()
+        let snapshots = await Task.detached(priority: .utility) {
+            IOKitCounters.snapshot()
+        }.value
+        return (snapshots, now)
+    }
+
+    private func tick() async {
+        // IOKitRegistry 遍历放到后台；只把最终数值 hop 回主 actor 更新界面。
+        let (snapshots, nowAt) = await fetchCounters()
         var nowByKey: [String: IOCounters] = [:]
         for snapshot in snapshots { nowByKey[snapshot.key] = snapshot.counters }
 

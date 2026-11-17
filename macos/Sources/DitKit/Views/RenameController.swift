@@ -81,9 +81,15 @@ final class RenameController {
         await scan(custom: custom)
     }
 
-    /// 自定义文本变化时旧预览立即失效，避免用过期名字执行重命名。
+    /// 改配置时旧预览立即失效，避免用过期名字执行重命名。
+    /// 已经执行完成（.applied）或用户停止（.stopped）的结果要保留，尤其报告链接与明细，
+    /// 否则执行后碰一下自定义输入框就会把刚生成的 MHL/PDF 全部清掉。
     func invalidatePreview() {
         guard !isBusy else { return }
+        if phase == .applied || phase == .stopped {
+            message = "结果已保留；修改配置后可重新生成预览，执行前请确认"
+            return
+        }
         items.removeAll()
         outcome = nil
         reportURLs = []

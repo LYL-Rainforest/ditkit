@@ -223,13 +223,17 @@ func sectionDevice(d map[string]any) Section {
 
 func sectionOverall(d, log map[string]any, r *Report) Section {
 	ss := obj(d, "smart_status")
-	passed, _ := ss["passed"].(bool)
 	rows := []Row{}
-	if passed {
+	if ss == nil {
+		// 部分 NVMe / USB 磁盘不提供 overall SMART status；缺失不等于「未通过」。
+		rows = append(rows, row("SMART 总体自检", "该设备未提供", StatusInfo, ""))
+	} else if passed, ok := ss["passed"].(bool); ok && passed {
 		rows = append(rows, row("SMART 总体自检", "通过", StatusOK, "磁盘自检结果正常"))
-	} else {
+	} else if ok {
 		rows = append(rows, row("SMART 总体自检", "未通过", StatusCritical, "磁盘自检结果异常"))
 		raise(r, StatusCritical, "SMART 总体自检未通过")
+	} else {
+		rows = append(rows, row("SMART 总体自检", "该设备未提供", StatusInfo, ""))
 	}
 	cw := int(numIn(log, "critical_warning"))
 	cwStatus := StatusOK

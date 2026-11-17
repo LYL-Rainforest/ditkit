@@ -117,7 +117,11 @@ public enum MHLVerifier {
             return .init(entry: entry, status: .unsupported,
                          detail: "DitKit 暂不支持 \(entry.algorithm) 算法")
         }
-        let fileURL = document.directory.appendingPathComponent(entry.path)
+        // 清单来自外部文件，path 必须是指向清单目录内的相对路径，杜绝 ../ 穿越读取任意文件。
+        guard let fileURL = safeURL(for: entry.path, under: document.directory) else {
+            return .init(entry: entry, status: .failed,
+                         detail: "清单条目路径非法：只允许清单目录内的相对路径")
+        }
         guard fm.fileExists(atPath: fileURL.path) else {
             return .init(entry: entry, status: .missing, detail: "文件不存在")
         }
@@ -138,5 +142,24 @@ public enum MHLVerifier {
     private static func sizeMismatch(_ expected: Int64?, _ actual: Int64) -> Bool {
         guard let expected else { return false }
         return expected != actual
+    }
+
+    /// 把清单里的相对路径解析成目录内的安全 URL；绝对路径、`..` 越界、符号链接跳出都拒绝。
+    /// 返回 nil 表示该条目路径非法，不应读取。
+    static func safeURL(for relativePath: String, under directory: URL) -> URL? {
+        guard !relativePath.isEmpty else { return nil }
+        // 绝对路径（含 Windows 盘符形式）一律拒绝。
+        if relativePath.hasPrefix("/") || relativePath.contains(":\\") { return nil }
+        let candidate = directory.appendingPathComponent(relativePath).standardizedFileURL
+        let base = directory.standardizedFileURL
+        let baseResolved = base.resolvingSymlinksInPath().path
+        let candidateResolved = candidate.resolvingSymlinksInPath().path
+        func isUnder(_ path: String, root: String) -> Bool {
+            path == root || path.hasPrefix(root.hasSuffix("/") ? root : root + "/")
+        }
+        // 标准化路径与符号链接解析后都必须仍位于目录内，双保险。
+        guard isUnder(candidate.path, root: base.path),
+              isUnder(candidateResolved, root: baseResolved) else { return nil }
+        return candidate
     }
 }

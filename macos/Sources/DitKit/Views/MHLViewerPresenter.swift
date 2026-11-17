@@ -9,6 +9,9 @@ final class MHLViewerPresenter {
     static let shared = MHLViewerPresenter()
 
     private var windowControllers: [NSWindowController] = []
+    /// 窗口 → 校验状态：窗口关闭时停止仍在后台跑的批量校验。
+    private var states: [NSWindow: MHLViewerState] = [:]
+    private var closeObservers: [NSWindow: NSObjectProtocol] = [:]
 
     /// 弹选择面板让用户挑任意 `.mhl` 文件（含历史报告），然后打开查看器。
     func chooseAndOpen() {
@@ -26,7 +29,15 @@ final class MHLViewerPresenter {
 
     /// 直接打开指定的 MHL 文件（也供结果区调用）。
     func open(_ url: URL) {
-        // 清掉已关闭窗口的控制器，避免长期持有 SwiftUI 视图。
+        // 清掉已关闭窗口的控制器与对应观察状态，避免长期持有 SwiftUI 视图。
+        let closed = windowControllers.filter { $0.window?.isVisible == false }
+        for controller in closed {
+            guard let window = controller.window else { continue }
+            if let observer = closeObservers.removeValue(forKey: window) {
+                NotificationCenter.default.removeObserver(observer)
+            }
+            states.removeValue(forKey: window)
+        }
         windowControllers.removeAll { $0.window?.isVisible == false }
 
         do {
@@ -42,6 +53,18 @@ final class MHLViewerPresenter {
             window.contentViewController = hosting
             window.setFrameAutosaveName("DitKitMHLViewer")
             window.center()
+            // 窗口关闭时停止后台校验并清理观察者和引用，避免无界面空转与内存滞留。
+            states[window] = state
+            closeObservers[window] = NotificationCenter.default.addObserver(
+                forName: NSWindow.willCloseNotification, object: window, queue: .main
+            ) { [weak self] notification in
+                guard let closed = notification.object as? NSWindow else { return }
+                self?.states[closed]?.cancelAll()
+                if let observer = self?.closeObservers.removeValue(forKey: closed) {
+                    NotificationCenter.default.removeObserver(observer)
+                }
+                self?.states.removeValue(forKey: closed)
+            }
             let controller = NSWindowController(window: window)
             windowControllers.append(controller)
             controller.showWindow(nil)

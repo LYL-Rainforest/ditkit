@@ -79,25 +79,35 @@ public enum RenamePlanner {
         onProgress: (@MainActor (Int, Int) -> Void)? = nil
     ) async -> PreviewOutcome {
         let total = urls.count
-        let collected: [(String, CaptureInfo?)] = await withTaskGroup(
-            of: (String, CaptureInfo?).self,
-            returning: [(String, CaptureInfo?)].self
-        ) { group in
-            for url in urls {
-                let key = url.standardizedFileURL.path
-                group.addTask {
-                    if let control, !(await control.gate()) { return (key, nil) }
-                    return (key, await EXIFReader.read(url: url))
+        // 分批扫描：同时最多 8 个 EXIF 读取任务，避免上千文件一次性起 Task 耗尽协作线程池、抬高内存峰值。
+        let batchSize = 8
+        var collected: [(String, CaptureInfo?)] = []
+        collected.reserveCapacity(total)
+        var done = 0
+        var batchStart = 0
+        while batchStart < total {
+            let batchEnd = min(batchStart + batchSize, total)
+            let batch: [(String, CaptureInfo?)] = await withTaskGroup(
+                of: (String, CaptureInfo?).self,
+                returning: [(String, CaptureInfo?)].self
+            ) { group in
+                for index in batchStart..<batchEnd {
+                    let url = urls[index]
+                    let key = url.standardizedFileURL.path
+                    group.addTask {
+                        if let control, !(await control.gate()) { return (key, nil) }
+                        return (key, await EXIFReader.read(url: url))
+                    }
                 }
+                var result: [(String, CaptureInfo?)] = []
+                result.reserveCapacity(batchEnd - batchStart)
+                for await pair in group { result.append(pair) }
+                return result
             }
-            var results: [(String, CaptureInfo?)] = []
-            var done = 0
-            for await pair in group {
-                results.append(pair)
-                done += 1
-                await onProgress?(done, total)
-            }
-            return results
+            collected.append(contentsOf: batch)
+            done += batch.count
+            await onProgress?(done, total)
+            batchStart = batchEnd
         }
         if control?.isStopped == true { return PreviewOutcome(items: [], stopped: true) }
         var infos: [String: CaptureInfo?] = [:]

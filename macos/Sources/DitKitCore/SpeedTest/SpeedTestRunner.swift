@@ -86,7 +86,7 @@ public enum SpeedTestRunner {
             if isCancelled() { throw SpeedTestError.cancelled }
             let want = Int(min(Int64(blockSize), config.bytes - written))
             let count = pattern.withUnsafeBytes { raw in
-                write(writeFD, raw.baseAddress, want)
+                writeWithRetry(writeFD, raw.baseAddress, want)
             }
             guard count > 0 else {
                 throw SpeedTestError.ioFailed("顺序写入失败：\(errnoMessage())")
@@ -123,7 +123,7 @@ public enum SpeedTestRunner {
         while totalRead < config.bytes {
             if isCancelled() { throw SpeedTestError.cancelled }
             let count = readBuffer.withUnsafeMutableBytes { raw in
-                read(readFD, raw.baseAddress, blockSize)
+                readWithRetry(readFD, raw.baseAddress, blockSize)
             }
             guard count >= 0 else {
                 throw SpeedTestError.ioFailed("顺序读取失败：\(errnoMessage())")
@@ -150,6 +150,23 @@ public enum SpeedTestRunner {
             readSeconds: readSeconds,
             directory: path
         )
+    }
+
+    /// 被信号中断时重试，避免偶发 EINTR 误判断 IO 失败。
+    private static func readWithRetry(_ fd: Int32, _ buffer: UnsafeMutableRawPointer?, _ count: Int) -> Int {
+        while true {
+            let n = read(fd, buffer, count)
+            if n < 0, errno == EINTR { continue }
+            return n
+        }
+    }
+
+    private static func writeWithRetry(_ fd: Int32, _ buffer: UnsafeRawPointer?, _ count: Int) -> Int {
+        while true {
+            let n = write(fd, buffer, count)
+            if n < 0, errno == EINTR { continue }
+            return n
+        }
     }
 
     private static func errnoMessage() -> String {

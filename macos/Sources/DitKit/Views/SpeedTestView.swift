@@ -61,6 +61,7 @@ struct SpeedTestView: View {
         switch controller.phase {
         case .idle: return "就绪"
         case .running: return "正在测速"
+        case .cancelling: return "正在取消"
         case .finished: return "测速完成"
         case .cancelled: return "已取消"
         case .failed: return "出错"
@@ -71,6 +72,7 @@ struct SpeedTestView: View {
         switch controller.phase {
         case .idle: return .secondary
         case .running: return .orange
+        case .cancelling: return .orange
         case .finished: return .green
         case .cancelled: return .orange
         case .failed: return .red
@@ -91,6 +93,7 @@ struct SpeedTestView: View {
                 .pickerStyle(.segmented)
                 .labelsHidden()
                 .frame(width: 280)
+                .disabled(controller.isRunning)
                 Text(controller.size.note).font(.caption).foregroundStyle(.secondary)
                 Spacer(minLength: 0)
             }
@@ -118,7 +121,12 @@ struct SpeedTestView: View {
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, alignment: .leading)
                 Spacer(minLength: 0)
-                if controller.isRunning {
+                if controller.phase == .cancelling {
+                    Button("取消中…") { }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                        .disabled(true)
+                } else if controller.isRunning {
                     Button("取消测速") { controller.cancel() }
                         .buttonStyle(.borderedProminent)
                         .controlSize(.small)

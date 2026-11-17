@@ -206,15 +206,21 @@ final class MHLViewerState {
     }
 
     /// 汇总统计跟随当前筛选，与「校验当前」保持一致。
+    /// 单次遍历累计各状态计数，避免大清单里对同一数组做 6 次 filter。
     var summary: String {
         let scope = filteredRows
         let prefix = isFiltered ? "当前筛选 · " : ""
-        let matched = scope.filter { $0.status == .matched }.count
-        let mismatch = scope.filter { $0.status == .mismatch }.count
-        let missing = scope.filter { $0.status == .missing }.count
-        let bad = scope.filter { $0.status == .failed || $0.status == .unsupported }.count
-        let nonVerifiable = scope.filter { $0.status == .notApplicable }.count
-        let unchecked = scope.filter { $0.status == .unchecked }.count
+        var matched = 0, mismatch = 0, missing = 0, bad = 0, nonVerifiable = 0, unchecked = 0
+        for row in scope {
+            switch row.status {
+            case .matched: matched += 1
+            case .mismatch: mismatch += 1
+            case .missing: missing += 1
+            case .failed, .unsupported: bad += 1
+            case .notApplicable: nonVerifiable += 1
+            case .unchecked: unchecked += 1
+            }
+        }
         if !hasVerified { return prefix + "共 \(scope.count) 条 · 尚未校验" }
         var tail = "一致 \(matched) · 不一致 \(mismatch) · 缺失 \(missing) · 异常 \(bad) · 共 \(scope.count) 条"
         if nonVerifiable > 0 { tail = "不校验 \(nonVerifiable) · " + tail }
@@ -270,6 +276,13 @@ final class MHLViewerState {
     func stop() {
         guard isVerifying else { return }
         control.stop()
+        isPaused = false
+    }
+
+    /// 窗口关闭时调用：让后台校验在下一个文件边界退出，避免无界面的空转。
+    func cancelAll() {
+        control.stop()
+        isVerifying = false
         isPaused = false
     }
 
@@ -361,6 +374,7 @@ struct MHLViewerView: View {
             TextField("现文件名 / 原文件名 / 路径 / 哈希", text: $state.searchText)
                 .textFieldStyle(.roundedBorder)
                 .frame(width: 268)
+                .disabled(state.isVerifying)
             HStack(spacing: 4) {
                 Text("操作")
                     .font(.caption)
