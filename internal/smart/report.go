@@ -16,11 +16,15 @@ const (
 )
 
 // Row 是已经翻译成中文的一行信息，SwiftUI 侧不需要再做任何本地化。
+// Key 是稳定的机器可读键（如 nvme_temperature / ata_5），供历史趋势对比；
+// Numeric 是同一行的原始数值，避免 Swift 侧解析中文展示字符串。
 type Row struct {
-	Label  string `json:"label"`
-	Value  string `json:"value"`
-	Status string `json:"status"`
-	Note   string `json:"note,omitempty"`
+	Key     string  `json:"key,omitempty"`
+	Label   string  `json:"label"`
+	Value   string  `json:"value"`
+	Numeric float64 `json:"numeric,omitempty"`
+	Status  string  `json:"status"`
+	Note    string  `json:"note,omitempty"`
 }
 
 type Section struct {
@@ -122,6 +126,10 @@ func appendSection(r *Report, s Section) {
 
 func row(label, value, status, note string) Row {
 	return Row{Label: label, Value: value, Status: status, Note: note}
+}
+
+func keyedRow(key, label, value string, numeric float64, status, note string) Row {
+	return Row{Key: key, Label: label, Value: value, Numeric: numeric, Status: status, Note: note}
 }
 
 func raise(r *Report, status, warning string) {
@@ -347,7 +355,7 @@ func sectionNVMeLog(log map[string]any, r *Report) Section {
 		default:
 			value, status = stringify(log[key]), StatusInfo
 		}
-		rows = append(rows, row(label, value, status, note))
+		rows = append(rows, keyedRow("nvme_"+key, label, value, n, status, note))
 	}
 	for _, k := range sortedKeys(log) {
 		if _, known := nvmeLogLabels[k]; known {
@@ -411,7 +419,8 @@ func sectionATAAttributes(ata map[string]any, r *Report) Section {
 		value := fmt.Sprintf("当前值 %s，最差值 %s，阈值 %s，原始值 %s",
 			FormatCount(numIn(e, "value")), FormatCount(numIn(e, "worst")),
 			FormatCount(numIn(e, "thresh")), FormatCount(numIn(raw, "value")))
-		rows = append(rows, row(name, value, status, note))
+		rows = append(rows, keyedRow(fmt.Sprintf("ata_%d", id), name, value,
+			numIn(raw, "value"), status, note))
 	}
 	if rev := obj(ata, "revision"); rev != nil {
 		rows = append(rows, row("属性表版本", stringify(rev), StatusInfo, ""))

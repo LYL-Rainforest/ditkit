@@ -147,6 +147,49 @@ func TestATAAttributesTranslated(t *testing.T) {
 	}
 }
 
+func TestRowsCarryStableKeysAndNumbers(t *testing.T) {
+	raw, _ := os.ReadFile("../../testdata/smart_nvme.json")
+	r, err := BuildReport(testDisk(), raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var temperature Row
+	found := false
+	for _, s := range r.Sections {
+		for _, row := range s.Rows {
+			if row.Key == "nvme_temperature" {
+				temperature, found = row, true
+			}
+		}
+	}
+	if !found {
+		t.Fatal("NVMe 温度行缺少稳定 key")
+	}
+	if temperature.Numeric <= 0 {
+		t.Errorf("NVMe 温度行缺少数值: %+v", temperature)
+	}
+
+	ataRaw := []byte(`{
+		"device":{"name":"/dev/disk1","type":"sat","protocol":"ATA"},
+		"smartctl":{"exit_status":0,"messages":[]},
+		"ata_smart_attributes":{"table":[
+			{"id":5,"name":"Reallocated_Sector_Ct","value":90,"worst":90,"thresh":10,"when_failed":"","raw":{"value":123}}
+		]}
+	}`)
+	ata, err := BuildReport(testDisk(), ataRaw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range ata.Sections {
+		for _, row := range s.Rows {
+			if row.Key == "ata_5" && row.Numeric == 123 {
+				return
+			}
+		}
+	}
+	t.Fatal("ATA 重映射扇区行缺少 ata_5 键或原始数值")
+}
+
 func TestCriticalWarningBits(t *testing.T) {
 	notes := CriticalWarningNotes(0b00000111)
 	if len(notes) != 3 {
@@ -175,7 +218,7 @@ func TestProtocolAndFormatting(t *testing.T) {
 	if !strings.Contains(ProtocolLabel("NVMe", "nvme"), "NVMe") {
 		t.Fatal("接口名称翻译异常")
 	}
-	if got := FormatDataUnits(19262727); !strings.Contains(got, "太字节") {
+	if got := FormatDataUnits(19262727); !strings.Contains(got, "TiB") {
 		t.Errorf("数据单位换算异常: %s", got)
 	}
 	if got := FormatHours(8760); !strings.Contains(got, "年") {

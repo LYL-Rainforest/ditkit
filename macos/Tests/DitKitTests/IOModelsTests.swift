@@ -83,16 +83,16 @@ final class IOModelsTests: XCTestCase {
         XCTAssertEqual(series.samples.first?.readBytesPerSecond, 10)
     }
 
-    func testChineseFormatting() {
-        XCTAssertEqual(IOFormat.speed(20_900_000), "20.9 MB/秒")
+    func testBinaryFormatting() {
+        XCTAssertEqual(IOFormat.speed(20_900_000), "19.9 MiB/秒")
         XCTAssertEqual(IOFormat.speed(0), "0 B/秒")
         XCTAssertEqual(IOFormat.ops(892.4), "892 次/秒")
         let parts = IOFormat.speedParts(100_700_000)
-        XCTAssertEqual(parts.0, "100.7")
-        XCTAssertEqual(parts.1, "MB/秒")
-        XCTAssertTrue(IOFormat.capacity(1_995_165_736_960).contains("太字节"))
-        XCTAssertFalse(IOFormat.capacity(1_995_165_736_960).contains("TiB"))
-        XCTAssertTrue(IOFormat.axis(15_000_000_000).contains("吉字节/秒"))
+        XCTAssertEqual(parts.0, "96.0")
+        XCTAssertEqual(parts.1, "MiB/秒")
+        XCTAssertEqual(IOFormat.capacity(1_995_165_736_960), "1.81 TiB")
+        XCTAssertEqual(IOFormat.axis(15_000_000_000), "14.0 GiB/秒")
+        XCTAssertEqual(IOFormat.capacity(0), "0 B")
     }
 
     /// 固定 10 分钟时间轴：每 2 分钟一条竖线，不能出现 6.7 / 3.3 分钟这种三分刻度。
@@ -109,17 +109,17 @@ final class IOModelsTests: XCTestCase {
         XCTAssertEqual(IOGrid.stepSeconds, 120)
     }
 
-    /// 同一组刻度必须用同一个单位且互不重复（早期版本取整后出现两个「2 兆字节/秒」）。
+    /// 同一组刻度必须用同一个单位且互不重复（早期版本取整后出现两个「2 MiB/秒」）。
     func testAxisTicksAreDistinctAndShareOneUnit() {
         let ceiling = 3_000_000.0
         let ticks = (0...5).map { IOFormat.axis(ceiling * Double($0) / 5, ceiling: ceiling) }
         XCTAssertEqual(Set(ticks).count, 6)
-        XCTAssertTrue(ticks.dropFirst().allSatisfy { $0.contains("MB/秒") })
+        XCTAssertTrue(ticks.dropFirst().allSatisfy { $0.contains("MiB/秒") })
         let integerTicks = (0...5).map {
             IOFormat.axis(20_000_000 * Double($0) / 5, ceiling: 20_000_000)
         }
-        XCTAssertEqual(integerTicks.last, "20 MB/秒")
-        XCTAssertEqual(integerTicks[1], "4 MB/秒")
-        XCTAssertEqual(IOFormat.capacity(2_000_000_000_000), "2 太字节")
+        XCTAssertEqual(integerTicks.last, "19.1 MiB/秒")
+        XCTAssertEqual(integerTicks[1], "3.8 MiB/秒")
+        XCTAssertEqual(IOFormat.capacity(2_000_000_000_000), "1.82 TiB")
     }
 }

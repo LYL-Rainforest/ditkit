@@ -69,6 +69,8 @@ public final class AppState {
         do {
             let rep: ReportDTO = try await client.request(Endpoints.smart(device: id))
             report = rep
+            // 趋势数据随每次成功采样落盘；60 秒内的重复刷新会自动去重。
+            SMARTHistory.record(rep)
             errorMessage = nil
         } catch {
             errorMessage = "读取 SMART 报告失败：\(error.localizedDescription)"

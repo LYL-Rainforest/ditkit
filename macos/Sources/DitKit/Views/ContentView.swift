@@ -2,12 +2,13 @@ import SwiftUI
 import AppKit
 import DitKitCore
 
-/// 主窗口容器：三个切换按钮放在窗口最顶部的标题栏，标题文字放在按钮下方的内容区第一行。
-/// SMART 健康、磁盘性能（实时 IO + 测速）、EXIF 重命名三个页面始终共存于 ZStack（用透明度切换），
+/// 主窗口容器：五个切换按钮放在窗口最顶部的标题栏，标题文字放在按钮下方的内容区第一行。
+/// SMART 健康、磁盘空间、磁盘性能、文件传输、EXIF 重命名五个页面始终共存于 ZStack（用透明度切换），
 /// 这样切换标签不会销毁视图，IO 采样器、历史曲线、测速状态与重命名预览得以保留。
 struct ContentView: View {
     private enum Tab: Hashable {
         case smart
+        case diskSpace
         case performance
         case transfer
         case rename
@@ -19,6 +20,7 @@ struct ContentView: View {
     private static var launchTab: Tab {
         let args = ProcessInfo.processInfo.arguments
         if args.contains("--io") || args.contains("--speedtest") || args.contains("--speedtest-run") { return .performance }
+        if args.contains("--diskspace") { return .diskSpace }
         if args.contains("--transfer") { return .transfer }
         if args.contains("--rename") { return .rename }
         return .smart
@@ -29,6 +31,7 @@ struct ContentView: View {
         switch selection {
         case .smart: return "DitKit · 磁盘 SMART 健康"
         case .performance: return "DitKit · 磁盘性能"
+        case .diskSpace: return "DitKit · 磁盘空间"
         case .transfer: return "DitKit · 文件传输"
         case .rename: return "DitKit · 素材 EXIF 重命名"
         }
@@ -48,6 +51,9 @@ struct ContentView: View {
                 SMARTView(state: state)
                     .opacity(selection == .smart ? 1 : 0)
                     .allowsHitTesting(selection == .smart)
+                DiskSpaceView()
+                    .opacity(selection == .diskSpace ? 1 : 0)
+                    .allowsHitTesting(selection == .diskSpace)
                 PerformanceView()
                     .opacity(selection == .performance ? 1 : 0)
                     .allowsHitTesting(selection == .performance)
@@ -66,13 +72,14 @@ struct ContentView: View {
             ToolbarItem(placement: .principal) {
                 Picker("页面", selection: $selection) {
                     Text("SMART 健康").tag(Tab.smart)
+                    Text("磁盘空间").tag(Tab.diskSpace)
                     Text("磁盘性能").tag(Tab.performance)
                     Text("文件传输").tag(Tab.transfer)
                     Text("重命名").tag(Tab.rename)
                 }
                 .pickerStyle(.segmented)
                 .labelsHidden()
-                .frame(width: 440)
+                .frame(width: 560)
             }
             if selection == .smart {
                 ToolbarItem(placement: .primaryAction) {

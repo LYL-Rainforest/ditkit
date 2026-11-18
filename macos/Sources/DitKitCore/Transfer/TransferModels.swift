@@ -13,6 +13,7 @@ public enum TransferAction: String, Sendable {
     case updated = "更新"   // 目标已存在但内容不同，覆盖
     case skipped = "跳过"   // 目标已存在且一致，无需处理
     case deleted = "删除"   // 同步模式下删除目标多余项
+    case partial = "断点"   // 大文件中途停止，部分数据已保留，可续传
     case failed = "失败"
 }
 
@@ -94,8 +95,36 @@ public struct TransferResult: Sendable {
     public var updated: Int { records.filter { $0.action == .updated }.count }
     public var skipped: Int { records.filter { $0.action == .skipped }.count }
     public var deleted: Int { records.filter { $0.action == .deleted }.count }
+    public var partial: Int { records.filter { $0.action == .partial }.count }
     public var failed:  Int { records.filter { $0.action == .failed }.count }
     public var verifiedOK: Int { records.filter { $0.verified && $0.action != .deleted }.count }
+}
+
+/// 单个目标目录的空间估算结果。
+public struct TransferSpaceTarget: Sendable, Equatable {
+    public let path: String
+    public let requiredBytes: Int64
+    /// 目标卷可用字节；无法读取时为 -1，此时不做缺口判断。
+    public let freeBytes: Int64
+
+    public var shortfall: Int64 {
+        guard freeBytes >= 0 else { return 0 }
+        return max(0, requiredBytes - freeBytes)
+    }
+}
+
+/// 一次任务在所有目标目录上的空间估算。
+public struct TransferSpaceEstimate: Sendable, Equatable {
+    public let targets: [TransferSpaceTarget]
+
+    public var hasShortfall: Bool { targets.contains { $0.shortfall > 0 } }
+
+    /// 供确认弹窗逐行显示缺口。
+    public var shortfallLines: [String] {
+        targets.filter { $0.shortfall > 0 }.map { target in
+            "\(target.path)：还差 \(IOFormat.capacity(target.shortfall))"
+        }
+    }
 }
 
 /// 传输任务配置。

@@ -375,6 +375,116 @@ final class TransferTests: XCTestCase {
         XCTAssertEqual(TransferEngine.estimateTotal(config: config), 1)
     }
 
+    func testLargeFileStopAndResumePreservesHash() async throws {
+        let fm = FileManager.default
+        let tmp = fm.temporaryDirectory.appendingPathComponent("DitKitResumeTest_\(UUID().uuidString)")
+        defer { try? fm.removeItem(at: tmp) }
+        let srcDir = tmp.appendingPathComponent("src")
+        let dstDir = tmp.appendingPathComponent("dst")
+        try fm.createDirectory(at: srcDir, withIntermediateDirectories: true)
+        try fm.createDirectory(at: dstDir, withIntermediateDirectories: true)
+        let source = srcDir.appendingPathComponent("large.bin")
+        let destination = dstDir.appendingPathComponent("large.bin")
+        let data = Data(repeating: 0xA5, count: 9 * 1024 * 1024)
+        try data.write(to: source)
+        let expectedHash = try await FileHasher.hash(fileAt: source, algorithm: .xxHash128).value
+
+        let control = RunControl()
+        let first = try await FileCopier.copyAndHashSourceWithResume(
+            source, to: destination, algorithm: .xxHash128, control: control,
+            onBlock: { written in
+                if written >= 2 * FileCopier.blockSize { control.stop() }
+            }
+        )
+        XCTAssertFalse(first.completed, "中途停止应留下部分文件")
+        XCTAssertEqual(first.partialBytes, Int64(2 * FileCopier.blockSize))
+        XCTAssertFalse(fm.fileExists(atPath: destination.path), "未完成时不应出现正式目标文件")
+        XCTAssertTrue(FileCopier.hasResumableCopy(source: source, destination: destination,
+                                                  algorithm: .xxHash128))
+
+        let second = try await FileCopier.copyAndHashSourceWithResume(
+            source, to: destination, algorithm: .xxHash128
+        )
+        XCTAssertTrue(second.completed)
+        XCTAssertTrue(second.resumed, "第二次应识别到断点")
+        XCTAssertEqual(second.sourceHash, expectedHash)
+        let dstHash = try await FileHasher.hash(fileAt: destination, algorithm: .xxHash128).value
+        XCTAssertEqual(dstHash, expectedHash, "续传结果必须与源文件逐字节一致")
+        XCTAssertFalse(FileCopier.hasResumableCopy(source: source, destination: destination,
+                                                   algorithm: .xxHash128), "完成后应清理断点状态")
+    }
+
+    func testChangedSourceInvalidatesResumeState() async throws {
+        let fm = FileManager.default
+        let tmp = fm.temporaryDirectory.appendingPathComponent("DitKitResumeStale_\(UUID().uuidString)")
+        defer { try? fm.removeItem(at: tmp) }
+        try fm.createDirectory(at: tmp, withIntermediateDirectories: true)
+        let source = tmp.appendingPathComponent("src.bin")
+        let destination = tmp.appendingPathComponent("dst.bin")
+        try Data(repeating: 1, count: 6 * 1024 * 1024).write(to: source)
+
+        let control = RunControl()
+        _ = try await FileCopier.copyAndHashSourceWithResume(
+            source, to: destination, algorithm: .md5, control: control,
+            onBlock: { written in
+                if written >= FileCopier.blockSize { control.stop() }
+            }
+        )
+        XCTAssertTrue(FileCopier.hasResumableCopy(source: source, destination: destination,
+                                                  algorithm: .md5))
+
+        // 源在中断后变大：旧部分数据必须作废，重新完整复制。
+        try Data(repeating: 2, count: 7 * 1024 * 1024).write(to: source)
+        XCTAssertFalse(FileCopier.hasResumableCopy(source: source, destination: destination,
+                                                   algorithm: .md5))
+        let outcome = try await FileCopier.copyAndHashSourceWithResume(
+            source, to: destination, algorithm: .md5
+        )
+        XCTAssertTrue(outcome.completed)
+        XCTAssertFalse(outcome.resumed)
+        let expected = try await FileHasher.hash(fileAt: source, algorithm: .md5).value
+        XCTAssertEqual(outcome.sourceHash, expected)
+    }
+
+    func testSpaceEstimateCountsCopyAndSyncBytes() async throws {
+        let fm = FileManager.default
+        let tmp = fm.temporaryDirectory.appendingPathComponent("DitKitSpaceTest_\(UUID().uuidString)")
+        defer { try? fm.removeItem(at: tmp) }
+        let src = tmp.appendingPathComponent("src")
+        try fm.createDirectory(at: src, withIntermediateDirectories: true)
+        try Data(repeating: 1, count: 1_000).write(to: src.appendingPathComponent("a.bin"))
+        try Data(repeating: 2, count: 2_000).write(to: src.appendingPathComponent("b.bin"))
+        let target = tmp.appendingPathComponent("target")
+        try fm.createDirectory(at: target, withIntermediateDirectories: true)
+
+        let copy = TransferConfig(mode: .copy, algorithm: .xxHash128,
+                                  sources: [src], targets: [target])
+        XCTAssertEqual(TransferEngine.estimateRequiredBytes(config: copy, target: target), 3_000)
+
+        // 同步：已有同大小文件算 0，缺文件算全量，尺寸变小算差值。
+        try Data(repeating: 1, count: 1_000).write(to: target.appendingPathComponent("a.bin"))
+        try Data(repeating: 2, count: 500).write(to: target.appendingPathComponent("b.bin"))
+        let sync = TransferConfig(mode: .sync, algorithm: .xxHash128,
+                                  sources: [src], targets: [target])
+        XCTAssertEqual(TransferEngine.estimateRequiredBytes(config: sync, target: target), 1_500)
+
+        let estimate = TransferEngine.estimateSpace(config: sync)
+        XCTAssertEqual(estimate.targets.count, 1)
+        XCTAssertEqual(estimate.targets.first?.requiredBytes, 1_500)
+        XCTAssertGreaterThan(estimate.targets.first?.freeBytes ?? -1, 0)
+    }
+
+    func testSpaceShortfallUsesApproximationOnlyWhenKnown() {
+        let short = TransferSpaceTarget(path: "/vol", requiredBytes: 2_000, freeBytes: 500)
+        XCTAssertEqual(short.shortfall, 1_500)
+        XCTAssertTrue(TransferSpaceEstimate(targets: [short]).hasShortfall)
+        XCTAssertEqual(TransferSpaceEstimate(targets: [short]).shortfallLines.first?.contains("KiB"), true)
+
+        let unknown = TransferSpaceTarget(path: "/vol", requiredBytes: 2_000, freeBytes: -1)
+        XCTAssertEqual(unknown.shortfall, 0, "无法读取可用空间时不应误报缺口")
+        XCTAssertFalse(TransferSpaceEstimate(targets: [unknown]).hasShortfall)
+    }
+
     // MARK: - 工具
 
     private func makeFile(bytes: [UInt8]) throws -> URL {

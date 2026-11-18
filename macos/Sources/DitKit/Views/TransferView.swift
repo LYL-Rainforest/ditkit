@@ -16,7 +16,7 @@ struct TransferView: View {
             controlBar
             sourceSection
             targetSection
-            if controller.isRunning { progressSection }
+            if controller.isActive { progressSection }
             resultSection
         }
         .padding(20)
@@ -27,6 +27,13 @@ struct TransferView: View {
             Button("确认同步", role: .destructive) { controller.confirmSync() }
         } message: {
             Text("同步模式会让每个目标目录完全对齐源目录：源没有的文件/文件夹会从各目标中删除。此操作不可逆。")
+        }
+        .alert("目标目录可用空间不足", isPresented: $controller.spaceConfirmRequested) {
+            Button("取消", role: .cancel) { controller.cancelSpace() }
+            Button("仍然继续", role: .destructive) { controller.confirmSpace() }
+        } message: {
+            Text((controller.spaceEstimate?.shortfallLines ?? []).joined(separator: "\n"))
+            Text("空间估算可能偏保守（APFS 共享空间、稀疏文件等）。继续后若写入失败，已完成的项仍会写入报告。")
         }
     }
 
@@ -50,10 +57,13 @@ struct TransferView: View {
 
             Spacer(minLength: 8)
 
-            if controller.isRunning {
+            if controller.isActive {
                 ProgressView().controlSize(.small)
                 Button(controller.isPaused ? "继续" : "暂停") { controller.pauseOrResume() }
                 Button("停止", role: .destructive) { controller.stop() }
+            } else if controller.isCheckingSpace {
+                ProgressView().controlSize(.small)
+                Text("检查空间中…").font(.caption).foregroundStyle(.secondary)
             }
             Button("清空") { controller.resetForMode() }
                 .disabled(controller.isRunning)
@@ -290,9 +300,10 @@ struct TransferView: View {
                     .foregroundStyle(.secondary)
                     .frame(width: 76, alignment: .trailing)
             }
-            Text(r.action == .deleted ? "—" : (r.verified ? "✓" : "✗"))
+            let noVerify = (r.action == .deleted || r.action == .partial)
+            Text(noVerify ? "—" : (r.verified ? "✓" : "✗"))
                 .font(.caption2)
-                .foregroundStyle(r.action == .deleted ? Color.secondary : (r.verified ? Color.green : Color.red))
+                .foregroundStyle(noVerify ? Color.secondary : (r.verified ? Color.green : Color.red))
                 .frame(width: 22, alignment: .center)
         }
         .padding(6)
@@ -300,7 +311,7 @@ struct TransferView: View {
     }
 
     private func byteString(_ size: Int64) -> String {
-        ByteCountFormatter.string(fromByteCount: size, countStyle: .file)
+        IOFormat.capacity(size)
     }
 
     private var messageColor: Color {
@@ -317,6 +328,7 @@ struct TransferView: View {
         case .copied: return .blue
         case .updated: return .orange
         case .skipped: return .secondary
+        case .partial: return .orange
         case .deleted: return .red
         case .failed: return .red
         }

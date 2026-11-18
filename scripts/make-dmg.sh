@@ -7,7 +7,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BUILD="$ROOT/build"
 APP="$BUILD/DitKit.app"
-VERSION="0.2.1"  # 仅备注；DMG 文件名不带版本号
+VERSION="0.3.0"  # 仅备注；DMG 文件名不带版本号
 VOLNAME="DitKit"
 DMG="$BUILD/DitKit.dmg"
 PYLIB="$BUILD/py"

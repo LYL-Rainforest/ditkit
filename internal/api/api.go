@@ -13,7 +13,7 @@ import (
 	"github.com/LYL-Rainforest/ditkit/internal/smart"
 )
 
-const Version = "0.2.1"
+const Version = "0.3.0"
 
 // scanCacheTTL 磁盘列表变化很少，短时间内复用扫描结果，避免每次 SMART 请求都重复跑 smartctl --scan。
 const scanCacheTTL = 30 * time.Second

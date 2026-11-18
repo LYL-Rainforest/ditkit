@@ -73,7 +73,7 @@ public struct MHLReportDetail: Sendable {
 ///   <creatorinfo>
 ///     <creationdate>ISO8601</creationdate>
 ///     <hostname>…</hostname>
-///     <tool version="0.2.1">DitKit</tool>
+///     <tool version="0.3.0">DitKit</tool>
 ///   </creatorinfo>
 ///   <processinfo>
 ///     <process>transfer|in-place|flatten</process>
@@ -131,7 +131,7 @@ public enum MHLReport {
         filePrefix: String,
         startedAt: Date,
         finishedAt: Date,
-        toolVersion: String = "0.2.1",
+        toolVersion: String = "0.3.0",
         detail: MHLReportDetail? = nil
     ) throws -> URL {
         var xml = """

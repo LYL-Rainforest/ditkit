@@ -33,9 +33,13 @@ public struct DisksResponse: Codable, Sendable {
 }
 
 public struct RowDTO: Codable, Sendable, Identifiable {
-    public var id: String { label + "|" + value }
+    public var id: String { (key ?? label) + "|" + value }
+    /// 后端给出的稳定机器键（如 nvme_temperature / ata_5）；旧版本报告可能没有。
+    public let key: String?
     public let label: String
     public let value: String
+    /// 同一行的原始数值，避免从中文展示字符串里二次解析。
+    public let numeric: Double?
     public let status: String
     public let note: String?
 }

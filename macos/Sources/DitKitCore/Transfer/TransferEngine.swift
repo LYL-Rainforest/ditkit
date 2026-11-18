@@ -12,14 +12,17 @@ public enum TransferEngine {
 
     /// 执行一次传输任务。
     /// - parameter onProgress: 非逃逸的 `@MainActor` 进度回调，供 UI 实时刷新。
-    /// - parameter control: 可选的执行控制器；在文件边界支持暂停/停止，停止后只写已完成部分。
+    /// - parameter control: 可选的执行控制器；在文件边界支持暂停/停止，
+    ///   ≥4 MiB 的大文件在块边界也能停止并保留断点，停止后只写已完成部分。
     public static func execute(
         config: TransferConfig,
         onProgress: @MainActor (TransferProgress) -> Void,
-        control: RunControl? = nil
+        control: RunControl? = nil,
+        spaceEstimate: TransferSpaceEstimate? = nil
     ) async -> TransferResult {
         let started = Date()
         var result = TransferResult(startedAt: started)
+        let space = spaceEstimate ?? estimateSpace(config: config)
 
         let targets = config.targets
         let progress = ProgressAccumulator(total: estimateTotal(config: config))
@@ -93,7 +96,8 @@ public enum TransferEngine {
                 }
             let meta = transferMeta(mode: config.mode, algorithm: config.algorithm,
                                     target: target, startedAt: started,
-                                    finishedAt: reportFinished, stopped: result.stopped)
+                                    finishedAt: reportFinished, stopped: result.stopped,
+                                    space: space)
             let summary = transferSummary(records: scoped, stopped: result.stopped)
             let detail = MHLReportDetail(
                 meta: meta, summary: summary,
@@ -105,7 +109,8 @@ public enum TransferEngine {
                         algorithm: record.algorithm,
                         sourceHash: record.sourceHash,
                         targetHash: record.targetHash,
-                        verify: record.action == .deleted ? "—" : (record.verified ? "一致" : "不一致"),
+                        verify: (record.action == .deleted || record.action == .partial)
+                            ? "—" : (record.verified ? "一致" : "不一致"),
                         note: record.note,
                         sourcePath: record.sourcePath.isEmpty ? nil : record.sourcePath,
                         targetPath: record.targetPath.isEmpty ? nil : record.targetPath
@@ -159,7 +164,8 @@ public enum TransferEngine {
         mhlURL: URL,
         startedAt: Date,
         finishedAt: Date,
-        stopped: Bool = false
+        stopped: Bool = false,
+        space: TransferSpaceEstimate? = nil
     ) throws -> URL {
         let pdfURL = mhlURL.deletingPathExtension().appendingPathExtension("pdf")
         let columns: [PDFReport.Column] = [
@@ -175,10 +181,11 @@ public enum TransferEngine {
             switch r.action {
             case .copied, .updated: color = r.verified ? .good : .bad
             case .skipped: color = r.verified ? .muted : .bad
+            case .partial: color = .muted
             case .deleted, .failed: color = .bad
             }
             let verify: String
-            if r.action == .deleted {
+            if r.action == .deleted || r.action == .partial {
                 verify = "—"
             } else {
                 verify = r.verified ? "一致" : "不一致"
@@ -192,7 +199,9 @@ public enum TransferEngine {
         try PDFReport.write(
             title: "DitKit 传输报告",
             meta: transferMeta(mode: mode, algorithm: algorithm, target: target,
-                               startedAt: startedAt, finishedAt: finishedAt, stopped: stopped),
+                               startedAt: startedAt, finishedAt: finishedAt, stopped: stopped,
+                    space: space
+                ),
             summary: transferSummary(records: records, stopped: stopped),
             columns: columns,
             rows: rows,
@@ -208,7 +217,8 @@ public enum TransferEngine {
         target: URL,
         startedAt: Date,
         finishedAt: Date,
-        stopped: Bool
+        stopped: Bool,
+        space: TransferSpaceEstimate? = nil
     ) -> [String] {
         var meta = [
             "模式：\(mode.rawValue)",
@@ -217,6 +227,16 @@ public enum TransferEngine {
             "开始时间：\(PDFReport.readable(startedAt))",
             "结束时间：\(PDFReport.readable(finishedAt))",
         ]
+        if let targetSpace = space?.targets.first(where: {
+            $0.path == target.standardizedFileURL.path || $0.path == target.path
+        }) {
+            if targetSpace.requiredBytes > 0 {
+                meta.append("预估所需空间：\(PDFReport.byteString(targetSpace.requiredBytes))")
+            }
+            if targetSpace.freeBytes >= 0 {
+                meta.append("目标卷可用空间：\(PDFReport.byteString(targetSpace.freeBytes))")
+            }
+        }
         if stopped { meta.append("状态：已停止（部分报告，仅含本次已完成的记录）") }
         return meta
     }
@@ -224,7 +244,7 @@ public enum TransferEngine {
     private static func transferSummary(records: [TransferRecord], stopped: Bool) -> [String] {
         let counts = TransferResult(records: records)
         var summary = [
-            "复制 \(counts.copied) · 更新 \(counts.updated) · 跳过 \(counts.skipped) · 删除 \(counts.deleted) · 失败 \(counts.failed) · 校验通过 \(counts.verifiedOK)"
+            "复制 \(counts.copied) · 更新 \(counts.updated) · 跳过 \(counts.skipped) · 删除 \(counts.deleted) · 断点 \(counts.partial) · 失败 \(counts.failed) · 校验通过 \(counts.verifiedOK)"
         ]
         if stopped { summary.append("本次任务被用户停止，未处理的文件不在清单内") }
         return summary
@@ -274,7 +294,7 @@ public enum TransferEngine {
             guard await shouldContinue(control) else { break targetLoop }
             try ensureDir(target)
             for entry in entries {
-                // 文件边界：暂停时等待，停止时立即收尾（当前文件不会被打断）。
+                // 文件边界：暂停时等待；大文件内部还会在 4 MiB 块边界保存断点。
                 guard await shouldContinue(control) else { break targetLoop }
                 let targetURL = target.appendingPathComponent(entry.rel)
                 try ensureDir(targetURL.deletingLastPathComponent())
@@ -304,12 +324,29 @@ public enum TransferEngine {
                     // 哈希不一致：落入下方更新路径（exists → remove + 重新复制）。
                 }
 
-                if exists { try? fm.removeItem(at: targetURL) }
+                if exists {
+                    try? fm.removeItem(at: targetURL)
+                    // 目标被替换，旧断点必须作废，否则下一轮会拿旧部分数据续传到新目标。
+                    FileCopier.clearResume(for: targetURL)
+                }
 
-                let (size, sourceHash) = try await FileCopier.copyAndHashSource(
+                let outcome = try await FileCopier.copyAndHashSourceWithResume(
                     entry.url, to: targetURL, algorithm: algorithm,
-                    knownSourceHash: comparedSourceHash
+                    knownSourceHash: comparedSourceHash, control: control
                 )
+                guard outcome.completed else {
+                    collected.records.append(.init(
+                        action: .partial, relativePath: entry.rel,
+                        sourcePath: entry.url.path, targetPath: targetURL.path,
+                        size: outcome.partialBytes, algorithm: algorithm.tag,
+                        sourceHash: "", targetHash: "", verified: false,
+                        note: "已停止，保留 \(outcome.partialBytes) 字节断点；下次可继续"
+                    ))
+                    await onProgress(progress.snapshot(phase: "已保存断点"))
+                    return
+                }
+                let size = outcome.size
+                let sourceHash = outcome.sourceHash
                 let targetHash = try await FileHasher.hash(fileAt: targetURL, algorithm: algorithm).value
                 let verified = (sourceHash == targetHash)
                 let action: TransferAction = exists ? .updated : .copied
@@ -319,7 +356,9 @@ public enum TransferEngine {
                     size: size, algorithm: algorithm.tag,
                     sourceHash: sourceHash, targetHash: targetHash,
                     verified: verified,
-                    note: verified ? "" : "校验失败：源与目标哈希不一致"
+                    note: verified
+                        ? (outcome.resumed ? "从断点续传，校验一致" : "")
+                        : "校验失败：源与目标哈希不一致"
                 ))
                 progress.done(current: entry.rel)
                 await onProgress(progress.snapshot(phase: "复制中"))
@@ -353,7 +392,7 @@ public enum TransferEngine {
 
             // 少补：复制/更新/跳过，让该目标对齐源。
             for item in sourceFiles {
-                // 文件边界：暂停时等待，停止时立即收尾（当前文件不会被打断）。
+                // 文件边界：暂停时等待；大文件内部还会在 4 MiB 块边界保存断点。
                 guard await shouldContinue(control) else { break targetLoop }
                 let targetURL = target.appendingPathComponent(item.rel)
                 try ensureDir(targetURL.deletingLastPathComponent())
@@ -381,11 +420,27 @@ public enum TransferEngine {
                     // 哈希不一致：落入下方更新路径（exists → remove + 重新复制）。
                 }
 
-                if exists { try? fm.removeItem(at: targetURL) }
-                let (size, sourceHash) = try await FileCopier.copyAndHashSource(
+                if exists {
+                    try? fm.removeItem(at: targetURL)
+                    FileCopier.clearResume(for: targetURL)
+                }
+                let outcome = try await FileCopier.copyAndHashSourceWithResume(
                     item.url, to: targetURL, algorithm: algorithm,
-                    knownSourceHash: comparedSourceHash
+                    knownSourceHash: comparedSourceHash, control: control
                 )
+                guard outcome.completed else {
+                    collected.records.append(.init(
+                        action: .partial, relativePath: item.rel,
+                        sourcePath: item.url.path, targetPath: targetURL.path,
+                        size: outcome.partialBytes, algorithm: algorithm.tag,
+                        sourceHash: "", targetHash: "", verified: false,
+                        note: "已停止，保留 \(outcome.partialBytes) 字节断点；下次可继续"
+                    ))
+                    await onProgress(progress.snapshot(phase: "已保存断点"))
+                    return
+                }
+                let size = outcome.size
+                let sourceHash = outcome.sourceHash
                 let targetHash = try await FileHasher.hash(fileAt: targetURL, algorithm: algorithm).value
                 let verified = (sourceHash == targetHash)
                 let action: TransferAction = exists ? .updated : .copied
@@ -395,7 +450,9 @@ public enum TransferEngine {
                     size: size, algorithm: algorithm.tag,
                     sourceHash: sourceHash, targetHash: targetHash,
                     verified: verified,
-                    note: verified ? "" : "校验失败：源与目标哈希不一致"
+                    note: verified
+                        ? (outcome.resumed ? "从断点续传，校验一致" : "")
+                        : "校验失败：源与目标哈希不一致"
                 ))
                 progress.done(current: item.rel)
                 await onProgress(progress.snapshot(phase: "同步中"))
@@ -547,6 +604,48 @@ public enum TransferEngine {
         guard name.hasPrefix("DitKit_") else { return false }
         let ext = url.pathExtension.lowercased()
         return ext == "mhl" || ext == "pdf"
+    }
+
+    /// 单个目标目录在本次任务中预估需要的额外字节数（纯计算，不接触文件系统写操作）。
+    public static func estimateRequiredBytes(config: TransferConfig, target: URL) -> Int64 {
+        switch config.mode {
+        case .copy:
+            return expandSources(config.sources).reduce(Int64(0)) { total, entry in
+                total + max(0, FileCopier.fileSize(entry.url))
+            }
+        case .sync:
+            guard let source = config.sources.first else { return 0 }
+            let fm = FileManager.default
+            return walkFiles(in: source, base: source).reduce(Int64(0)) { total, item in
+                let dst = target.appendingPathComponent(item.rel)
+                guard fm.fileExists(atPath: dst.path) else {
+                    return total + max(0, FileCopier.fileSize(item.url))
+                }
+                // 同大小且内容一致会跳过；不同大小时引擎先删旧再写新，只需补差值。
+                let srcSize = FileCopier.fileSize(item.url)
+                let dstSize = FileCopier.fileSize(dst)
+                return total + max(0, srcSize - dstSize)
+            }
+        }
+    }
+
+    /// 各目标目录的空间估算：所需字节取本目标口径，可用字节取目标所在卷。
+    public static func estimateSpace(config: TransferConfig) -> TransferSpaceEstimate {
+        let fm = FileManager.default
+        let targets = config.targets.map { target -> TransferSpaceTarget in
+            var probe = target
+            while !fm.fileExists(atPath: probe.path), probe.pathComponents.count > 1 {
+                probe = probe.deletingLastPathComponent()
+            }
+            let attrs = try? fm.attributesOfFileSystem(forPath: probe.path)
+            let free = (attrs?[.systemFreeSize] as? NSNumber)?.int64Value ?? -1
+            return TransferSpaceTarget(
+                path: target.standardizedFileURL.path,
+                requiredBytes: estimateRequiredBytes(config: config, target: target),
+                freeBytes: free
+            )
+        }
+        return TransferSpaceEstimate(targets: targets)
     }
 
     static func estimateTotal(config: TransferConfig) -> Int {

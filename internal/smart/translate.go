@@ -166,14 +166,14 @@ func FormatCount(v float64) string {
 	return sign + b.String()
 }
 
-// FormatBytes 使用磁盘厂商与 smartctl 一致的十进制（SI）换算：
-// 1 太字节 = 1000^4 字节，与 smartctl 显示的 TB 数值一致。
+// FormatBytes 使用二进制（IEC）换算，与全项目字节单位口径一致：
+// 1 TiB = 1024^4 字节，单位统一显示为 B / KiB / MiB / GiB / TiB / PiB。
 func FormatBytes(b float64) string {
-	units := []string{"字节", "千字节", "兆字节", "吉字节", "太字节", "拍字节"}
+	units := []string{"B", "KiB", "MiB", "GiB", "TiB", "PiB"}
 	v := b
 	i := 0
-	for v >= 1000 && i < len(units)-1 {
-		v /= 1000
+	for v >= 1024 && i < len(units)-1 {
+		v /= 1024
 		i++
 	}
 	return fmt.Sprintf("%.2f %s", v, units[i])

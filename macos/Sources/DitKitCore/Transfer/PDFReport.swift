@@ -265,10 +265,10 @@ public enum PDFReport {
         return f.string(from: date)
     }
 
-    /// 字节数格式化（B/KB/MB/GB/TB，1024 进制）。
+    /// 字节数格式化（B/KiB/MiB/GiB/TiB，1024 进制），与全项目二进制口径一致。
     public static func byteString(_ bytes: Int64) -> String {
-        let units: [(String, Double)] = [("B", 1), ("KB", 1024), ("MB", 1024 * 1024),
-                                         ("GB", 1024 * 1024 * 1024), ("TB", 1024 * 1024 * 1024 * 1024)]
+        let units: [(String, Double)] = [("B", 1), ("KiB", 1024), ("MiB", 1024 * 1024),
+                                         ("GiB", 1024 * 1024 * 1024), ("TiB", 1024 * 1024 * 1024 * 1024)]
         var chosen = units[0]
         for unit in units where Double(bytes) >= unit.1 { chosen = unit }
         let value = Double(bytes) / chosen.1

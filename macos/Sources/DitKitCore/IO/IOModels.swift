@@ -228,33 +228,33 @@ public enum IOGrid {
     }
 }
 
-// MARK: - 中文格式化（十进制，与磁盘厂商及 smartctl 的容量口径一致）
+// MARK: - 二进制字母格式化（1024 进制，B / KiB / MiB / GiB / TiB / PiB）
 
 public enum IOFormat {
-    private static let units = ["字节", "千字节", "兆字节", "吉字节", "太字节", "拍字节"]
+    private static let units = ["B", "KiB", "MiB", "GiB", "TiB", "PiB"]
 
-    /// 速率：例如 20.9 MB/秒。界面沿用截图里的 MB/秒、GB/秒写法。
+    /// 速率：例如 19.9 MiB/秒。全项目统一二进制字母口径，与测速页一致。
     public static func speed(_ bytesPerSecond: Double) -> String {
         guard bytesPerSecond.isFinite, bytesPerSecond > 0 else { return "0 B/秒" }
-        if bytesPerSecond < 1_000 { return String(format: "%.0f B/秒", bytesPerSecond) }
-        let short = ["B/秒", "KB/秒", "MB/秒", "GB/秒", "TB/秒"]
+        if bytesPerSecond < 1_024 { return String(format: "%.0f B/秒", bytesPerSecond) }
+        let short = ["B/秒", "KiB/秒", "MiB/秒", "GiB/秒", "TiB/秒"]
         var value = bytesPerSecond
         var i = 0
-        while value >= 1_000 && i < short.count - 1 {
-            value /= 1_000
+        while value >= 1_024 && i < short.count - 1 {
+            value /= 1_024
             i += 1
         }
-        // 截图中 20.9 / 100.7 这类读数都保留一位小数，不能用 %.0f 抹掉小数。
+        // 保留一位小数，不能用 %.0f 抹掉读数差异。
         return String(format: "%.1f", value) + " " + short[i]
     }
 
-    /// 图表纵轴刻度，用中文单位；保留一位小数，避免 1.5/2/2.5 被取整成同一个标签。
+    /// 图表纵轴刻度，用二进制字母单位；保留一位小数，避免刻度被取整成同一个标签。
     public static func axis(_ bytesPerSecond: Double) -> String {
         guard bytesPerSecond.isFinite, bytesPerSecond > 0 else { return "0" }
         var value = bytesPerSecond
         var i = 0
-        while value >= 1_000 && i < units.count - 1 {
-            value /= 1_000
+        while value >= 1_024 && i < units.count - 1 {
+            value /= 1_024
             i += 1
         }
         return String(format: "%.1f", value) + " " + units[i] + "/秒"
@@ -263,17 +263,17 @@ public enum IOFormat {
     /// 同一组刻度统一使用量程对应的单位，短单位便于排版。
     public static func axis(_ value: Double, ceiling: Double) -> String {
         guard value.isFinite, value > 0 else { return "0" }
-        let short = ["B", "KB", "MB", "GB", "TB", "PB"]
+        let short = ["B", "KiB", "MiB", "GiB", "TiB", "PiB"]
         var i = 0
         var scale = ceiling
-        while scale >= 1_000 && i < short.count - 1 {
-            scale /= 1_000
+        while scale >= 1_024 && i < short.count - 1 {
+            scale /= 1_024
             i += 1
         }
         var divisor = 1.0
-        for _ in 0..<i { divisor *= 1_000 }
+        for _ in 0..<i { divisor *= 1_024 }
         let converted = value / divisor
-        // 小数位按刻度间隔统一决定，同一组刻度不会出现「20 MB/秒」与「8.0 MB/秒」混排。
+        // 小数位按刻度间隔统一决定，同一组刻度不会出现「20 MiB/秒」与「8.0 MiB/秒」混排。
         let step = ceiling / divisor / 5
         let decimals: Int
         if step >= 1 {
@@ -296,14 +296,14 @@ public enum IOFormat {
     }
 
     public static func capacity(_ bytes: Int64) -> String {
-        guard bytes > 0 else { return "0 字节" }
+        guard bytes > 0 else { return "0 B" }
         var value = Double(bytes)
         var i = 0
-        while value >= 1_000 && i < units.count - 1 {
-            value /= 1_000
+        while value >= 1_024 && i < units.count - 1 {
+            value /= 1_024
             i += 1
         }
-        // 整数容量不拖小数尾巴：2 太字节，而不是 2.00 太字节。
+        // 整数容量不拖小数尾巴：2 TiB，而不是 2.00 TiB。
         let text = abs(value - value.rounded()) < 0.005
             ? String(format: "%.0f", value)
             : String(format: "%.2f", value)

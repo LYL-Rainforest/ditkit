@@ -9,8 +9,10 @@ public struct IOVolumeInfo: Sendable, Equatable {
     public let freeBytes: Int64
     public let bsdNames: [String]
 
+    public var usedBytes: Int64 { max(0, totalBytes - freeBytes) }
+
     public var summary: String {
-        "启动卷 \(name) · 可用 \(IOFormat.capacity(freeBytes)) / 总容量 \(IOFormat.capacity(totalBytes))"
+        "启动卷 \(name) · 已用 \(IOFormat.capacity(usedBytes)) · 剩余 \(IOFormat.capacity(freeBytes)) · 总量 \(IOFormat.capacity(totalBytes))"
     }
 }
 

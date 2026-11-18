@@ -7,7 +7,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BUILD="$ROOT/build"
 APP="$BUILD/DitKit.app"
-VERSION="0.2.1"
+VERSION="0.3.0"
 BUNDLE_ID="cn.rainforest.ditkit"
 
 mkdir -p "$BUILD"

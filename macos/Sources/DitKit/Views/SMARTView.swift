@@ -60,7 +60,9 @@ struct SMARTView: View {
                     errorBanner(error)
                 }
                 if let report = state.report {
+                    if !alerts.isEmpty { alertsCard(alerts) }
                     summaryCard(report)
+                    trendCard
                     ForEach(report.sections) { section in
                         SectionCard(section: section)
                     }
@@ -86,6 +88,101 @@ struct SMARTView: View {
             }
             .padding(24)
             .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    // MARK: 趋势与告警
+
+    private var currentSnapshot: SMARTSnapshot? {
+        state.report.map { SMARTHistory.makeSnapshot(from: $0) }
+    }
+
+    private var alerts: [SMARTAlert] {
+        guard let snapshot = currentSnapshot else { return [] }
+        return SMARTAnalysis.alerts(in: snapshot)
+    }
+
+    private var history: [SMARTSnapshot] {
+        guard let id = state.report?.device.id else { return [] }
+        return SMARTHistory.load(diskID: id)
+    }
+
+    private func alertsCard(_ items: [SMARTAlert]) -> some View {
+        let critical = items.contains { $0.level == .critical }
+        return VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Image(systemName: critical ? "exclamationmark.octagon.fill" : "exclamationmark.triangle.fill")
+                Text(critical ? "检测到严重健康指标" : "有指标触发告警阈值")
+                    .font(.headline)
+                Spacer()
+                Text("共 \(items.count) 项").font(.caption)
+            }
+            ForEach(items) { item in
+                HStack(alignment: .top, spacing: 8) {
+                    Circle().fill(item.level == .critical ? Color.red : Color.orange)
+                        .frame(width: 6, height: 6)
+                        .padding(.top, 5)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(item.title).font(.system(size: 12.5, weight: .medium))
+                        Text(item.detail).font(.caption).foregroundStyle(.secondary)
+                    }
+                    Spacer(minLength: 0)
+                }
+            }
+        }
+        .padding(16)
+        .foregroundStyle(critical ? Color.red : Color.orange)
+        .background((critical ? Color.red : Color.orange).opacity(0.08),
+                    in: RoundedRectangle(cornerRadius: 12))
+    }
+
+    private var trendCard: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 8) {
+                Text("历史趋势").font(.headline)
+                Spacer()
+                Text("已记录 \(history.count) 次 · 阈值：温度 ≥45°C / 备用 ≤20% / 寿命 ≥80%")
+                    .font(.caption2).foregroundStyle(.secondary)
+                if state.report != nil {
+                    Button("清空") {
+                        if let id = state.report?.device.id { SMARTHistory.clear(diskID: id) }
+                    }
+                    .controlSize(.small)
+                }
+            }
+            if history.count < 2 {
+                Text("再采样一次即可显示趋势曲线；每次成功刷新都会记录一条历史。")
+                    .font(.caption).foregroundStyle(.secondary)
+            } else if let snapshot = currentSnapshot {
+                let definitions = SMARTMetricDefinition.allCases
+                    .filter { snapshot.metric($0.key) != nil }
+                    .prefix(6)
+                ForEach(Array(definitions), id: \.key) { definition in
+                    trendRow(definition, snapshot: snapshot)
+                }
+            }
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .cardBackground()
+    }
+
+    private func trendRow(_ definition: SMARTMetricDefinition, snapshot: SMARTSnapshot) -> some View {
+        let points = SMARTAnalysis.series(for: history, key: definition.key)
+        let metric = snapshot.metric(definition.key)
+        let level = metric.flatMap { definition.level(for: $0.value) }
+        return HStack(spacing: 12) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(definition.label).font(.system(size: 12.5, weight: .medium))
+                if let metric {
+                    Text("\(String(format: "%g", metric.value)) \(metric.unit)")
+                        .font(.caption2).foregroundStyle(.secondary)
+                }
+            }
+            .frame(width: 116, alignment: .leading)
+            Sparkline(points: points,
+                      color: level == .critical ? .red : (level == .warn ? .orange : .accentColor))
+                .frame(height: 26)
         }
     }
 
@@ -227,6 +324,34 @@ extension View {
                 RoundedRectangle(cornerRadius: 12)
                     .stroke(Color.secondary.opacity(0.2), lineWidth: 0.5)
             )
+    }
+}
+
+// MARK: - 迷你趋势曲线
+
+private struct Sparkline: View {
+    let points: [SMARTSeriesPoint]
+    let color: Color
+
+    var body: some View {
+        GeometryReader { geometry in
+            Path { path in
+                guard points.count > 1 else { return }
+                let values = points.map(\.value)
+                let low = values.min() ?? 0
+                let high = values.max() ?? 1
+                let span = max(1e-6, high - low)
+                let stepX = geometry.size.width / CGFloat(points.count - 1)
+                for (index, point) in points.enumerated() {
+                    let x = CGFloat(index) * stepX
+                    let ratio = CGFloat((point.value - low) / span)
+                    let y = geometry.size.height - ratio * geometry.size.height
+                    if index == 0 { path.move(to: CGPoint(x: x, y: y)) }
+                    else { path.addLine(to: CGPoint(x: x, y: y)) }
+                }
+            }
+            .stroke(color, lineWidth: 1.6)
+        }
     }
 }
 

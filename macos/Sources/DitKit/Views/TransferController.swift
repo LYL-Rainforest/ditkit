@@ -28,14 +28,21 @@ final class TransferController {
     var result: TransferResult?
     var message = "选择来源，并至少填写一个目标目录"
     var syncConfirmRequested = false
+    var spaceConfirmRequested = false
+    var isCheckingSpace = false
+    var spaceEstimate: TransferSpaceEstimate?
 
     @ObservationIgnored private var control = RunControl()
+    @ObservationIgnored private var pendingConfig: TransferConfig?
+    @ObservationIgnored private var pendingEstimate: TransferSpaceEstimate?
     /// 从点击启动到 perform() 真正把 phase 置为 .running 之间存在调度窗口；
     /// 这个标志在同一同步调用栈里立即占位，杜绝快速双击跑出两个并发任务。
     @ObservationIgnored private var launchGuard = false
 
-    /// 任务仍活着（含暂停），期间禁止改配置或重复启动。
-    var isRunning: Bool { phase == .running || phase == .paused }
+    /// 任务真正在跑（含暂停），只用于控制条的暂停/停止与进度显示。
+    var isActive: Bool { phase == .running || phase == .paused }
+    /// 任务仍活着（含空间检查、确认弹窗、暂停），期间禁止改配置或重复启动。
+    var isRunning: Bool { isActive || isCheckingSpace || spaceConfirmRequested }
     var isPaused: Bool { phase == .paused }
 
     var canRun: Bool {
@@ -149,20 +156,73 @@ final class TransferController {
             syncConfirmRequested = true
             return
         }
-        launchGuard = true
-        Task { await perform() }
+        startTransfer()
     }
 
     func confirmSync() {
         guard syncConfirmRequested, canRun else { return }
         syncConfirmRequested = false
-        launchGuard = true
-        Task { await perform() }
+        startTransfer()
     }
 
     func cancelSync() {
         syncConfirmRequested = false
         launchGuard = false
+    }
+
+    /// 空间不足弹窗：用户选择继续后按原配置启动。
+    func confirmSpace() {
+        guard spaceConfirmRequested, let config = pendingConfig else { return }
+        spaceConfirmRequested = false
+        launchTransfer(config: config, estimate: pendingEstimate)
+    }
+
+    func cancelSpace() {
+        spaceConfirmRequested = false
+        pendingConfig = nil
+        pendingEstimate = nil
+        launchGuard = false
+        message = "已取消：目标目录可用空间不足"
+    }
+
+    /// 先在后台估算各目标所需空间；目录遍历可能较慢，不能卡住主线程。
+    private func startTransfer() {
+        guard canRun else { return }
+        launchGuard = true
+        isCheckingSpace = true
+        message = "正在检查目标目录可用空间…"
+        let config = makeConfig()
+        Task { [weak self] in
+            let estimate = await Task.detached(priority: .utility) {
+                TransferEngine.estimateSpace(config: config)
+            }.value
+            guard let self else { return }
+            self.isCheckingSpace = false
+            self.spaceEstimate = estimate
+            self.pendingConfig = config
+            self.pendingEstimate = estimate
+            if estimate.hasShortfall {
+                self.spaceConfirmRequested = true
+            } else {
+                self.launchTransfer(config: config, estimate: estimate)
+            }
+        }
+    }
+
+    private func launchTransfer(config: TransferConfig, estimate: TransferSpaceEstimate?) {
+        control = RunControl()
+        phase = .running
+        launchGuard = false
+        message = config.mode == .copy ? "正在复制（按文件大小分流，≥4MiB 直传）…" : "正在同步…"
+        Task { await perform(config: config, estimate: estimate) }
+    }
+
+    private func makeConfig() -> TransferConfig {
+        let validTargets = targetStrings
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+            .map { URL(fileURLWithPath: ($0 as NSString).expandingTildeInPath) }
+        return TransferConfig(mode: mode, algorithm: algorithm, sources: sources, targets: validTargets)
     }
 
     /// 暂停 / 继续切换。控制点在文件边界，当前文件不会被打断。
@@ -201,21 +261,9 @@ final class TransferController {
             : "同步模式：选择一个源目录；目标 1~3 个目录"
     }
 
-    private func perform() async {
-        // 快照启动瞬间的配置，运行中即便界面控件被改动，本次任务也用同一份配置与统计口径。
-        let runMode = mode
-        let runAlgorithm = algorithm
-        let runSources = sources
-        control = RunControl()
-        phase = .running
-        launchGuard = false
-        message = runMode == .copy ? "正在复制（按文件大小分流，≥4MiB 直传）…" : "正在同步…"
-        let validTargets = targetStrings
-            .map { $0.trimmingCharacters(in: .whitespaces) }
-            .filter { !$0.isEmpty }
-            .map { URL(fileURLWithPath: ($0 as NSString).expandingTildeInPath) }
-
-        let config = TransferConfig(mode: runMode, algorithm: runAlgorithm, sources: runSources, targets: validTargets)
+    private func perform(config: TransferConfig, estimate: TransferSpaceEstimate?) async {
+        // 配置已在启动瞬间快照，运行中即便界面控件被改动，本次任务也用同一份配置与统计口径。
+        let runMode = config.mode
         let onProgress: @MainActor (TransferProgress) -> Void = { [weak self] p in
             guard let self else { return }
             var adjusted = p
@@ -226,7 +274,8 @@ final class TransferController {
             }
             self.progress = adjusted
         }
-        let res = await TransferEngine.execute(config: config, onProgress: onProgress, control: control)
+        let res = await TransferEngine.execute(config: config, onProgress: onProgress,
+                                               control: control, spaceEstimate: estimate)
         result = res
         launchGuard = false
         progress.phase = res.stopped ? "已停止" : "完成"
@@ -236,13 +285,14 @@ final class TransferController {
             : "　⚠️ 报告写入失败：\(res.reportErrors.joined(separator: "；"))"
         let counts = "复制 \(res.copied) · 更新 \(res.updated) · 跳过 \(res.skipped)" +
             (runMode == .sync ? " · 删除 \(res.deleted)" : "") +
-            " · 失败 \(res.failed) · 校验通过 \(res.verifiedOK)"
+            " · 断点 \(res.partial) · 失败 \(res.failed) · 校验通过 \(res.verifiedOK)"
         if let err = res.errorMessage {
             phase = .failed(err)
             message = "传输出错：\(err)\(reportErrorNote)"
         } else if res.stopped {
             phase = .stopped
-            message = "已停止 · \(counts) · 已生成部分报告　\(reportNote)\(reportErrorNote)"
+            let resumeNote = res.partial > 0 ? "；已保存断点，下次可继续" : ""
+            message = "已停止 · \(counts)\(resumeNote) · 已生成部分报告　\(reportNote)\(reportErrorNote)"
         } else {
             phase = .done
             message = "完成 · \(counts)　\(reportNote)\(reportErrorNote)"
