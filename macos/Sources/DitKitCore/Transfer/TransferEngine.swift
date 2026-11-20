@@ -69,81 +69,95 @@ public enum TransferEngine {
 
         result.stopped = control?.isStopped ?? false
 
-        // 每个目标目录根写一组报告（ASC MHL v2.0 清单 + PDF 明细表）。
+        // 报告写入：每个目标目录按所选位置（同目录 / 自定义目录 / 两者）各写一组报告。
         // 标准 <hashes> 收录本目录内所有存在且已算过哈希的文件（复制/更新/跳过）；
         // 删除/失败等没有有效目标文件的操作，连同元信息、汇总一起写进完整明细段。
-        // 停止时 records 只含已完成部分，故为部分报告。
+        // 停止时 records 只含已完成部分，故为部分报告。两个位置都不选则完全不写报告。
         let reportFinished = Date()
-        for target in targets {
-            let rawRoot = target.path
-            let resolvedRoot = target.resolvingSymlinksInPath().path
-            let scoped = result.records.filter {
-                isUnder($0.targetPath, root: rawRoot) || isUnder($0.targetPath, root: resolvedRoot)
-            }
-            let entries: [MHLReport.Entry] = scoped
-                .filter { $0.action == .copied || $0.action == .updated || $0.action == .skipped }
-                .map { record in
-                    let mtime = try? FileManager.default.attributesOfItem(
-                        atPath: record.targetPath
-                    )[.modificationDate] as? Date
-                    return MHLReport.Entry(
-                        path: record.relativePath,
-                        size: record.size >= 0 ? record.size : nil,
-                        lastModificationDate: mtime,
-                        algorithm: record.algorithm,
-                        hashValue: record.sourceHash
-                    )
+        let placement = config.reportPlacement
+        if placement.producesReports {
+            for target in targets {
+                let rawRoot = target.path
+                let resolvedRoot = target.resolvingSymlinksInPath().path
+                let scoped = result.records.filter {
+                    isUnder($0.targetPath, root: rawRoot) || isUnder($0.targetPath, root: resolvedRoot)
                 }
-            let meta = transferMeta(mode: config.mode, algorithm: config.algorithm,
-                                    target: target, startedAt: started,
-                                    finishedAt: reportFinished, stopped: result.stopped,
-                                    space: space)
-            let summary = transferSummary(records: scoped, stopped: result.stopped)
-            let detail = MHLReportDetail(
-                meta: meta, summary: summary,
-                records: scoped.map { record in
-                    MHLReportDetail.Record(
-                        action: record.action.rawValue,
-                        path: record.relativePath,
-                        size: record.size >= 0 ? record.size : nil,
-                        algorithm: record.algorithm,
-                        sourceHash: record.sourceHash,
-                        targetHash: record.targetHash,
-                        verify: (record.action == .deleted || record.action == .partial)
-                            ? "—" : (record.verified ? "一致" : "不一致"),
-                        note: record.note,
-                        sourcePath: record.sourcePath.isEmpty ? nil : record.sourcePath,
-                        targetPath: record.targetPath.isEmpty ? nil : record.targetPath
-                    )
-                }
-            )
-            let mhlURL: URL
-            do {
-                mhlURL = try MHLReport.write(
-                    entries: entries,
-                    process: "transfer",
-                    directory: target,
-                    filePrefix: "DitKit_传输报告_\(config.mode.rawValue)_\(config.algorithm.tag)",
-                    startedAt: started,
-                    finishedAt: reportFinished,
-                    detail: detail
+                let entries: [MHLReport.Entry] = scoped
+                    .filter { $0.action == .copied || $0.action == .updated || $0.action == .skipped }
+                    .map { record in
+                        let mtime = try? FileManager.default.attributesOfItem(
+                            atPath: record.targetPath
+                        )[.modificationDate] as? Date
+                        return MHLReport.Entry(
+                            path: record.relativePath,
+                            size: record.size >= 0 ? record.size : nil,
+                            lastModificationDate: mtime,
+                            algorithm: record.algorithm,
+                            hashValue: record.sourceHash
+                        )
+                    }
+                let meta = transferMeta(mode: config.mode, algorithm: config.algorithm,
+                                        target: target, startedAt: started,
+                                        finishedAt: reportFinished, stopped: result.stopped,
+                                        space: space)
+                let summary = transferSummary(records: scoped, stopped: result.stopped)
+                let detail = MHLReportDetail(
+                    meta: meta, summary: summary,
+                    records: scoped.map { record in
+                        MHLReportDetail.Record(
+                            action: record.action.rawValue,
+                            path: record.relativePath,
+                            size: record.size >= 0 ? record.size : nil,
+                            algorithm: record.algorithm,
+                            sourceHash: record.sourceHash,
+                            targetHash: record.targetHash,
+                            verify: (record.action == .deleted || record.action == .partial)
+                                ? "—" : (record.verified ? "一致" : "不一致"),
+                            note: record.note,
+                            sourcePath: record.sourcePath.isEmpty ? nil : record.sourcePath,
+                            targetPath: record.targetPath.isEmpty ? nil : record.targetPath
+                        )
+                    }
                 )
-            } catch {
-                result.reportErrors.append("\(target.lastPathComponent) 的 MHL 报告写入失败：\(error.localizedDescription)")
-                continue
-            }
-            result.reportURLs.append(mhlURL)
 
-            // 同目录根写一份配套 PDF（人类可读的完整明细表），与 MHL 明细段同源。
-            do {
-                let pdfURL = try writeTransferPDF(
-                    records: scoped, mode: config.mode, algorithm: config.algorithm,
-                    target: target, mhlURL: mhlURL, startedAt: started,
-                    finishedAt: reportFinished, stopped: result.stopped
-                )
-                result.reportURLs.append(pdfURL)
-            } catch {
-                result.reportErrors.append("\(target.lastPathComponent) 的 PDF 报告写入失败：\(error.localizedDescription)")
+                // 同一份报告写到若干位置；同目录用原名，自定义目录平铺并带来源标识。
+                let basePrefix = "DitKit_传输报告_\(config.mode.rawValue)_\(config.algorithm.tag)"
+                for output in placement.outputs(natural: target, basePrefix: basePrefix) {
+                    try? ensureDir(output.directory)
+                    let mhlURL: URL
+                    do {
+                        mhlURL = try MHLReport.write(
+                            entries: entries,
+                            process: "transfer",
+                            directory: output.directory,
+                            filePrefix: output.filePrefix,
+                            startedAt: started,
+                            finishedAt: reportFinished,
+                            detail: detail
+                        )
+                    } catch {
+                        result.reportErrors.append(
+                            "\(output.directory.lastPathComponent) 的 MHL 报告写入失败：\(error.localizedDescription)"
+                        )
+                        continue
+                    }
+                    result.reportURLs.append(mhlURL)
+
+                    // 配套 PDF（与 MHL 同名、同目录），与 MHL 明细段同源。
+                    do {
+                        let pdfURL = try writeTransferPDF(
+                            records: scoped, mode: config.mode, algorithm: config.algorithm,
+                            target: target, mhlURL: mhlURL, startedAt: started,
+                            finishedAt: reportFinished, stopped: result.stopped,
+                            space: space
+                        )
+                        result.reportURLs.append(pdfURL)
+                    } catch {
+                        result.reportErrors.append(
+                            "\(output.directory.lastPathComponent) 的 PDF 报告写入失败：\(error.localizedDescription)"
+                        )
+                    }
+                }
             }
         }
 
@@ -599,11 +613,13 @@ public enum TransferEngine {
     }
 
     /// 是否为 DitKit 生成报告文件（同步的「多删」阶段要保护它们）。
+    /// 只认新命名：时间在前、形如 `<时间戳>_DitKit_….ext`；旧命名不再保护。
     private static func isReportFile(_ url: URL) -> Bool {
         let name = url.lastPathComponent
-        guard name.hasPrefix("DitKit_") else { return false }
         let ext = url.pathExtension.lowercased()
-        return ext == "mhl" || ext == "pdf"
+        guard ext == "mhl" || ext == "pdf" else { return false }
+        guard let core = ReportNaming.stripTimestamp(name) else { return false }
+        return core.hasPrefix("DitKit_")
     }
 
     /// 单个目标目录在本次任务中预估需要的额外字节数（纯计算，不接触文件系统写操作）。

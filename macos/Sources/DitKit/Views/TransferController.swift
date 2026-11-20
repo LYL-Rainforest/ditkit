@@ -23,6 +23,7 @@ final class TransferController {
     var algorithm: HashAlgorithm = .xxHash128
     var sources: [URL] = []                 // 复制：多个；同步：恰好一个目录
     var targetStrings: [String] = ["", "", ""]   // 最多三个目标目录路径
+    var reportPlacement = ReportPlacement.default  // 报告存放位置（同目录 / 自定义 / 两者 / 都不选）
     var phase: Phase = .idle
     var progress = TransferProgress()
     var result: TransferResult?
@@ -222,7 +223,8 @@ final class TransferController {
             .map { $0.trimmingCharacters(in: .whitespaces) }
             .filter { !$0.isEmpty }
             .map { URL(fileURLWithPath: ($0 as NSString).expandingTildeInPath) }
-        return TransferConfig(mode: mode, algorithm: algorithm, sources: sources, targets: validTargets)
+        return TransferConfig(mode: mode, algorithm: algorithm, sources: sources,
+                              targets: validTargets, reportPlacement: reportPlacement)
     }
 
     /// 暂停 / 继续切换。控制点在文件边界，当前文件不会被打断。
@@ -279,20 +281,24 @@ final class TransferController {
         result = res
         launchGuard = false
         progress.phase = res.stopped ? "已停止" : "完成"
-        let reportNote = res.reportURLs.first.map { "报告：\($0.lastPathComponent)" } ?? ""
-        let reportErrorNote = res.reportErrors.isEmpty
-            ? ""
-            : "　⚠️ 报告写入失败：\(res.reportErrors.joined(separator: "；"))"
+        let reportsEnabled = config.reportPlacement.producesReports
+        let reportNote = reportsEnabled
+            ? (res.reportURLs.first.map { "报告：\($0.lastPathComponent)" } ?? "")
+            : ""
+        let reportErrorNote = reportsEnabled && !res.reportErrors.isEmpty
+            ? "　⚠️ 报告写入失败：\(res.reportErrors.joined(separator: "；"))"
+            : ""
         let counts = "复制 \(res.copied) · 更新 \(res.updated) · 跳过 \(res.skipped)" +
             (runMode == .sync ? " · 删除 \(res.deleted)" : "") +
             " · 断点 \(res.partial) · 失败 \(res.failed) · 校验通过 \(res.verifiedOK)"
+        let reportSuffix = reportsEnabled ? " · 已生成部分报告" : ""
         if let err = res.errorMessage {
             phase = .failed(err)
             message = "传输出错：\(err)\(reportErrorNote)"
         } else if res.stopped {
             phase = .stopped
             let resumeNote = res.partial > 0 ? "；已保存断点，下次可继续" : ""
-            message = "已停止 · \(counts)\(resumeNote) · 已生成部分报告　\(reportNote)\(reportErrorNote)"
+            message = "已停止 · \(counts)\(resumeNote)\(reportSuffix)　\(reportNote)\(reportErrorNote)"
         } else {
             phase = .done
             message = "完成 · \(counts)　\(reportNote)\(reportErrorNote)"

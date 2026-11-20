@@ -37,7 +37,7 @@ build/                  所有构建产物（已 gitignore，不分层）
 ```bash
 make            # 完整构建 = make dmg
 make app        # 只生成 build/DitKit.app 与 build/ditkitd
-make dmg        # 生成 build/DitKit-0.3.0.dmg
+make dmg        # 生成 build/DitKit-0.3.1.dmg
 make test       # go test ./... + swift test --disable-sandbox
 make clean      # 删除 build/ 内的产物与中间文件
 make distclean  # 再删除 macos/.build 与 build/py 缓存
@@ -47,7 +47,7 @@ open build/DitKit.app
 ```
 
 脚本也可单独调用：`scripts/build-app.sh`、`scripts/make-dmg.sh`。
-`build/` 不分层，最终产物为 `DitKit.app`、`ditkitd`、`DitKit-0.3.0.dmg`；中间背景图在打包成功后自动清理。
+`build/` 不分层，最终产物为 `DitKit.app`、`ditkitd`、`DitKit-0.3.1.dmg`；中间背景图在打包成功后自动清理。
 
 ## 运行机制
 

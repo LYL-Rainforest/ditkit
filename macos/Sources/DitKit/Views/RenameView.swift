@@ -13,6 +13,9 @@ struct RenameView: View {
             if controller.isBusy { runProgressSection }
             formatHint
             pickerZone
+            ReportPlacementSection(placement: $controller.reportPlacement,
+                                   isDisabled: controller.isBusy,
+                                   alongsideHint: "原文件所在目录")
             if !controller.inputs.isEmpty { inputList }
             if !controller.items.isEmpty { listHeader }
             listArea

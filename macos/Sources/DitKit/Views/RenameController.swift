@@ -32,6 +32,7 @@ final class RenameController {
     var outcome: RenameOutcome?
     var reportURLs: [URL] = []
     var runProgress = RunProgress()
+    var reportPlacement = ReportPlacement.default  // 报告存放位置
 
     @ObservationIgnored private var control = RunControl()
     @ObservationIgnored private var pausedFrom: Phase = .scanning
@@ -187,7 +188,8 @@ final class RenameController {
         let stopped = control.isStopped
         message = (stopped ? "已停止 · " : "") +
             "已重命名 \(result.renamed) 个 · 无需改动 \(result.unchanged) 个 · 失败 \(result.failed) 个"
-        // 每个实际产生改动的目录根各写一组 ASC MHL v2.0 + PDF；停止时只列已完成项。
+        // 每个实际产生改动的目录根按所选位置各写一组 ASC MHL v2.0 + PDF；停止时只列已完成项。
+        // 报告位置都不选时 RenameMHL.write 直接返回空数组。
         do {
             reportURLs = try await RenameMHL.write(
                 items: updated,
@@ -195,7 +197,8 @@ final class RenameController {
                 finishedAt: Date(),
                 onlyCompleted: stopped,
                 statusNote: stopped ? "已停止（部分报告，未处理项保留原文件名）" : nil,
-                allowEmpty: stopped
+                allowEmpty: stopped,
+                placement: reportPlacement
             )
             if !reportURLs.isEmpty {
                 message += " · 已生成 \(reportURLs.count) 个报告文件（MHL 清单 + PDF）"

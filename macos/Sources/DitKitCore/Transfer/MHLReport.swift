@@ -73,7 +73,7 @@ public struct MHLReportDetail: Sendable {
 ///   <creatorinfo>
 ///     <creationdate>ISO8601</creationdate>
 ///     <hostname>…</hostname>
-///     <tool version="0.3.0">DitKit</tool>
+///     <tool version="0.3.1">DitKit</tool>
 ///   </creatorinfo>
 ///   <processinfo>
 ///     <process>transfer|in-place|flatten</process>
@@ -131,7 +131,7 @@ public enum MHLReport {
         filePrefix: String,
         startedAt: Date,
         finishedAt: Date,
-        toolVersion: String = "0.3.0",
+        toolVersion: String = "0.3.1",
         detail: MHLReportDetail? = nil
     ) throws -> URL {
         var xml = """
@@ -163,7 +163,9 @@ public enum MHLReport {
         if let detail { xml += detailXML(detail) }
         xml += "\n</hashlist>\n"
 
-        let fileURL = directory.appendingPathComponent("\(filePrefix)_\(timestamp(finishedAt)).mhl")
+        let fileURL = directory.appendingPathComponent(
+            ReportNaming.fileName(filePrefix: filePrefix, ext: "mhl", at: finishedAt)
+        )
         // 先原子落盘新报告，成功后再清理旧报告；避免写失败时连历史清单一起丢失。
         try xml.write(to: fileURL, atomically: true, encoding: .utf8)
         cleanPreviousReports(directory: directory, filePrefix: filePrefix, except: fileURL)
@@ -226,15 +228,8 @@ public enum MHLReport {
         return f.string(from: date)
     }
 
-    private static func timestamp(_ date: Date) -> String {
-        let f = DateFormatter()
-        // 精确到毫秒：同一秒内连续执行两轮时避免文件名碰撞（后一轮覆盖前一轮）。
-        f.dateFormat = "yyyyMMdd_HHmmssSSS"
-        f.timeZone = TimeZone.current
-        return f.string(from: date)
-    }
-
     /// 删除目录根中同一前缀的历史报告（.mhl/.pdf），保证每个目标只保留最新一组。
+    /// 只认新命名（时间在前，`时间戳_前缀.ext`）；旧命名不再识别，留在目录里也不会被删。
     /// - parameter except: 刚写入的新报告，清理时必须跳过，否则会把自己删掉。
     public static func cleanPreviousReports(directory: URL, filePrefix: String, except: URL? = nil) {
         let fm = FileManager.default
@@ -243,11 +238,11 @@ public enum MHLReport {
         for child in children {
             if let keep, child.standardizedFileURL.path == keep { continue }
             let name = child.lastPathComponent
-            guard name.hasPrefix(filePrefix + "_") else { continue }
             let ext = child.pathExtension.lowercased()
-            if ext == "mhl" || ext == "pdf" {
-                try? fm.removeItem(at: child)
-            }
+            guard ext == "mhl" || ext == "pdf" else { continue }
+            // 只匹配新格式：<时间戳>_<prefix>.ext。
+            let matches = ReportNaming.stripTimestamp(name).map { $0 == filePrefix + "." + ext } ?? false
+            if matches { try? fm.removeItem(at: child) }
         }
     }
 

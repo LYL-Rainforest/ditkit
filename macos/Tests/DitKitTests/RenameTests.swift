@@ -151,6 +151,75 @@ final class RenameTests: XCTestCase {
         XCTAssertEqual(updated.first?.state, .unchanged)
     }
 
+    // MARK: - 报告存放位置
+
+    /// 造一个已重命名成功的条目（报告写入需要 state == .renamed 且新文件存在）。
+    private func renamedItem(in dir: URL) throws -> RenameItem {
+        let newURL = dir.appendingPathComponent("20261109_224503_000.jpg")
+        try write("x", at: newURL)
+        var item = RenameItem(
+            url: dir.appendingPathComponent("IMG_0001.jpg"),
+            capture: nil,
+            captureDateText: "20261109_224503 · 文件时间",
+            millisecond: "000",
+            millisecondSource: .system,
+            proposedName: "20261109_224503_000.jpg"
+        )
+        item.state = .renamed
+        return item
+    }
+
+    func testRenameReportPlacementNoneWritesNothing() async throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let item = try renamedItem(in: root)
+        let urls = try await RenameMHL.write(
+            items: [item], startedAt: Date(), finishedAt: Date(),
+            placement: ReportPlacement(writeAlongside: false, customDirectory: "")
+        )
+        XCTAssertTrue(urls.isEmpty)
+        let reports = (try? FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: nil))?
+            .filter { $0.pathExtension == "mhl" || $0.pathExtension == "pdf" } ?? []
+        XCTAssertTrue(reports.isEmpty)
+    }
+
+    func testRenameReportPlacementCustomOnlyWritesToCustomDir() async throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let custom = root.appendingPathComponent("reports")
+        let item = try renamedItem(in: root)
+        let urls = try await RenameMHL.write(
+            items: [item], startedAt: Date(), finishedAt: Date(),
+            placement: ReportPlacement(writeAlongside: false, customDirectory: custom.path)
+        )
+        XCTAssertEqual(urls.count, 2, "一组 MHL + PDF")
+        for url in urls {
+            XCTAssertEqual(url.deletingLastPathComponent().standardizedFileURL.path,
+                           custom.standardizedFileURL.path)
+            XCTAssertTrue(FileManager.default.fileExists(atPath: url.path))
+        }
+    }
+
+    func testRenameReportPlacementBothWritesToBothDirs() async throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let custom = root.appendingPathComponent("reports")
+        let item = try renamedItem(in: root)
+        let urls = try await RenameMHL.write(
+            items: [item], startedAt: Date(), finishedAt: Date(),
+            placement: ReportPlacement(writeAlongside: true, customDirectory: custom.path)
+        )
+        XCTAssertEqual(urls.count, 4)
+        let inRoot = urls.filter {
+            $0.deletingLastPathComponent().standardizedFileURL.path == root.standardizedFileURL.path
+        }
+        let inCustom = urls.filter {
+            $0.deletingLastPathComponent().standardizedFileURL.path == custom.standardizedFileURL.path
+        }
+        XCTAssertEqual(inRoot.count, 2)
+        XCTAssertEqual(inCustom.count, 2)
+    }
+
     // MARK: - EXIF 字典解析（注入 ImageIO 写入端无法生成的子秒字段）
 
     func testEXIFSubSecondTwoDigitsProducesPaddedName() async throws {

@@ -9,15 +9,18 @@ public enum RenameMHL {
     /// - parameter onlyCompleted: 停止场景下只把已完成项写入报告，剩余 `.pending` 项不列入清单；
     /// - parameter statusNote: 附加到 PDF 的状态说明（例如「已停止（部分报告）」）；
     /// - parameter allowEmpty: 即使一个文件都没处理完，也生成一组空的 MHL + PDF。
+    /// - parameter placement: 报告存放位置；都不选时不写任何报告文件。
     public static func write(
         items: [RenameItem],
         startedAt: Date,
         finishedAt: Date,
         onlyCompleted: Bool = false,
         statusNote: String? = nil,
-        allowEmpty: Bool = false
+        allowEmpty: Bool = false,
+        placement: ReportPlacement = .default
     ) async throws -> [URL] {
         let fm = FileManager.default
+        guard placement.producesReports else { return [] }
         var byDirectory: [String: [RenameItem]] = [:]
         for item in items {
             byDirectory[item.directory.standardizedFileURL.path, default: []].append(item)
@@ -133,46 +136,49 @@ public enum RenameMHL {
             }
             let detail = MHLReportDetail(meta: meta, summary: summary, records: detailRecords)
 
-            // MHL 清单（无有效条目时跳过；停止场景仍写空清单，便于留档）。
-            var mhlURL: URL?
-            if !entries.isEmpty || allowEmpty {
-                mhlURL = try MHLReport.write(
-                    entries: entries,
-                    process: "in-place",
-                    directory: dirURL,
-                    filePrefix: "DitKit_重命名报告",
-                    startedAt: startedAt,
-                    finishedAt: finishedAt,
-                    detail: detail
-                )
-                if let url = mhlURL { urls.append(url) }
-            }
+            // 同一组报告写到所选位置；同目录用原名，自定义目录平铺并带来源标识。
+            for output in placement.outputs(natural: dirURL, basePrefix: "DitKit_重命名报告") {
+                try? fm.createDirectory(at: output.directory, withIntermediateDirectories: true)
 
-            // PDF 明细表：文件名与 MHL 同名（或独立时间戳名）。
-            let pdfURL = (mhlURL ?? dirURL.appendingPathComponent("DitKit_重命名报告_\(pdfTimestamp(finishedAt))"))
-                .deletingPathExtension().appendingPathExtension("pdf")
-            try PDFReport.write(
-                title: "DitKit 重命名报告",
-                meta: meta,
-                summary: summary,
-                columns: [
-                    .init(name: "操作", width: 62),
-                    .init(name: "原文件名", width: 0),
-                    .init(name: "新文件名", width: 0),
-                    .init(name: "xxh128", width: 138, monospace: true),
-                ],
-                rows: pdfRows,
-                to: pdfURL
-            )
-            urls.append(pdfURL)
+                // MHL 清单（无有效条目时跳过；停止场景仍写空清单，便于留档）。
+                var mhlURL: URL?
+                if !entries.isEmpty || allowEmpty {
+                    mhlURL = try MHLReport.write(
+                        entries: entries,
+                        process: "in-place",
+                        directory: output.directory,
+                        filePrefix: output.filePrefix,
+                        startedAt: startedAt,
+                        finishedAt: finishedAt,
+                        detail: detail
+                    )
+                    if let url = mhlURL { urls.append(url) }
+                }
+
+                // PDF 明细表：文件名与 MHL 同名（或独立时间戳名）。
+                let pdfURL: URL
+                if let mhlURL {
+                    pdfURL = mhlURL.deletingPathExtension().appendingPathExtension("pdf")
+                } else {
+                    let name = ReportNaming.fileName(filePrefix: output.filePrefix, ext: "pdf", at: finishedAt)
+                    pdfURL = output.directory.appendingPathComponent(name)
+                }
+                try PDFReport.write(
+                    title: "DitKit 重命名报告",
+                    meta: meta,
+                    summary: summary,
+                    columns: [
+                        .init(name: "操作", width: 62),
+                        .init(name: "原文件名", width: 0),
+                        .init(name: "新文件名", width: 0),
+                        .init(name: "xxh128", width: 138, monospace: true),
+                    ],
+                    rows: pdfRows,
+                    to: pdfURL
+                )
+                urls.append(pdfURL)
+            }
         }
         return urls
-    }
-
-    private static func pdfTimestamp(_ date: Date) -> String {
-        let f = DateFormatter()
-        f.dateFormat = "yyyyMMdd_HHmmssSSS"
-        f.timeZone = TimeZone.current
-        return f.string(from: date)
     }
 }

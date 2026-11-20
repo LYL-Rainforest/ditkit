@@ -133,11 +133,14 @@ public struct TransferConfig: Sendable {
     public let algorithm: HashAlgorithm
     public let sources: [URL]           // 复制模式：文件/文件夹；同步模式：单个目录
     public let targets: [URL]           // 至少一个目录；复制模式最多三个
+    public let reportPlacement: ReportPlacement  // 报告存放位置
 
-    public init(mode: TransferMode, algorithm: HashAlgorithm, sources: [URL], targets: [URL]) {
+    public init(mode: TransferMode, algorithm: HashAlgorithm, sources: [URL], targets: [URL],
+                reportPlacement: ReportPlacement = .default) {
         self.mode = mode
         self.algorithm = algorithm
         self.sources = sources
         self.targets = targets
+        self.reportPlacement = reportPlacement
     }
 }

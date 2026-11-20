@@ -16,6 +16,9 @@ struct TransferView: View {
             controlBar
             sourceSection
             targetSection
+            ReportPlacementSection(placement: $controller.reportPlacement,
+                                   isDisabled: controller.isRunning,
+                                   alongsideHint: "目标目录根")
             if controller.isActive { progressSection }
             resultSection
         }

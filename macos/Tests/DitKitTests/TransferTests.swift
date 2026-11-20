@@ -240,7 +240,12 @@ final class TransferTests: XCTestCase {
         XCTAssertEqual(xml.components(separatedBy: "<hash>").count - 1, 1, "部分清单只含已完成项")
         let pdf = mhl.deletingPathExtension().appendingPathExtension("pdf")
         XCTAssertTrue(fm.fileExists(atPath: pdf.path))
-        let copiedNames = try fm.contentsOfDirectory(atPath: target.path).filter { !$0.hasPrefix("DitKit_") }
+        let copiedNames = try fm.contentsOfDirectory(atPath: target.path).filter { name in
+            // 排除报告文件：新格式时间在前，旧格式 DitKit_ 开头。
+            if name.hasPrefix("DitKit_") { return false }
+            if ReportNaming.stripTimestamp(name) != nil { return false }
+            return true
+        }
         XCTAssertEqual(copiedNames.count, 1, "停止后第二个文件不应被复制")
     }
 
@@ -483,6 +488,135 @@ final class TransferTests: XCTestCase {
         let unknown = TransferSpaceTarget(path: "/vol", requiredBytes: 2_000, freeBytes: -1)
         XCTAssertEqual(unknown.shortfall, 0, "无法读取可用空间时不应误报缺口")
         XCTAssertFalse(TransferSpaceEstimate(targets: [unknown]).hasShortfall)
+    }
+
+    // MARK: - 报告命名格式
+
+    func testReportFilesUseTimestampFirstNaming() async throws {
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("DitKitNameFmt_\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        try FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
+        let (src, target) = try makeTransferFixture(tmp)
+
+        let result = await TransferEngine.execute(
+            config: TransferConfig(mode: .copy, algorithm: .xxHash128, sources: [src], targets: [target]),
+            onProgress: { _ in }
+        )
+        XCTAssertNil(result.errorMessage)
+        XCTAssertEqual(result.reportURLs.count, 2)
+        for url in result.reportURLs {
+            let name = url.lastPathComponent
+            XCTAssertNotNil(ReportNaming.stripTimestamp(name),
+                            "报告名应以时间戳开头且秒毫秒分隔: \(name)")
+            XCTAssertTrue(name.contains("DitKit_传输报告"))
+        }
+    }
+
+    func testSyncCleanupKeepsNewFormatReportFiles() async throws {
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("DitKitSyncKeepReport_\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        try FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
+        let src = tmp.appendingPathComponent("src")
+        try FileManager.default.createDirectory(at: src, withIntermediateDirectories: true)
+        try "hello".write(to: src.appendingPathComponent("a.txt"), atomically: true, encoding: .utf8)
+
+        let target = tmp.appendingPathComponent("target")
+        try FileManager.default.createDirectory(at: target, withIntermediateDirectories: true)
+        // 预置一个「新格式」报告文件（源里没有），同步的多删阶段必须保护它。
+        let reportName = ReportNaming.fileName(filePrefix: "DitKit_传输报告_复制_xxh128",
+                                               ext: "mhl", at: Date())
+        try "legacy report".write(to: target.appendingPathComponent(reportName), atomically: true, encoding: .utf8)
+
+        let config = TransferConfig(mode: .sync, algorithm: .xxHash128, sources: [src], targets: [target])
+        let result = await TransferEngine.execute(config: config, onProgress: { _ in })
+        XCTAssertNil(result.errorMessage)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: target.appendingPathComponent(reportName).path),
+                      "同步多删不应删除 DitKit 报告文件（新格式）")
+    }
+
+    // MARK: - 报告存放位置
+
+    private func makeTransferFixture(_ tmp: URL) throws -> (source: URL, target: URL) {
+        let src = tmp.appendingPathComponent("src")
+        let target = tmp.appendingPathComponent("target")
+        try FileManager.default.createDirectory(at: src, withIntermediateDirectories: true)
+        try "payload".write(to: src.appendingPathComponent("a.txt"), atomically: true, encoding: .utf8)
+        return (src, target)
+    }
+
+    func testReportPlacementNoneWritesNoReportFiles() async throws {
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("DitKitPlaceNone_\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        try FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
+        let (src, target) = try makeTransferFixture(tmp)
+
+        let placement = ReportPlacement(writeAlongside: false, customDirectory: "")
+        let config = TransferConfig(mode: .copy, algorithm: .xxHash128,
+                                    sources: [src], targets: [target], reportPlacement: placement)
+        let result = await TransferEngine.execute(config: config, onProgress: { _ in })
+        XCTAssertNil(result.errorMessage)
+        XCTAssertEqual(result.copied, 1, "传输本身不受报告开关影响")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: target.appendingPathComponent("a.txt").path))
+        XCTAssertTrue(result.reportURLs.isEmpty, "都不选时不应写任何报告")
+        XCTAssertTrue(result.reportErrors.isEmpty)
+        let mhls = (try? FileManager.default.contentsOfDirectory(at: target, includingPropertiesForKeys: nil))?
+            .filter { $0.pathExtension == "mhl" } ?? []
+        XCTAssertTrue(mhls.isEmpty, "目标目录不应残留报告")
+    }
+
+    func testReportPlacementCustomOnlyWritesToCustomDir() async throws {
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("DitKitPlaceCustom_\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        try FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
+        let (src, target) = try makeTransferFixture(tmp)
+        let custom = tmp.appendingPathComponent("reports")
+
+        let placement = ReportPlacement(writeAlongside: false, customDirectory: custom.path)
+        let config = TransferConfig(mode: .copy, algorithm: .xxHash128,
+                                    sources: [src], targets: [target], reportPlacement: placement)
+        let result = await TransferEngine.execute(config: config, onProgress: { _ in })
+        XCTAssertNil(result.errorMessage)
+        XCTAssertEqual(result.reportURLs.count, 2, "只写自定义目录：一组 MHL+PDF")
+        for url in result.reportURLs {
+            XCTAssertEqual(url.deletingLastPathComponent().standardizedFileURL.path,
+                           custom.standardizedFileURL.path, "报告应落在自定义目录")
+            XCTAssertTrue(FileManager.default.fileExists(atPath: url.path))
+        }
+        let targetReports = (try? FileManager.default.contentsOfDirectory(at: target, includingPropertiesForKeys: nil))?
+            .filter { $0.pathExtension == "mhl" || $0.pathExtension == "pdf" } ?? []
+        XCTAssertTrue(targetReports.isEmpty, "只选自定义时目标目录不应有报告")
+    }
+
+    func testReportPlacementBothWritesToBothDirsWithDistinctNames() async throws {
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("DitKitPlaceBoth_\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        try FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
+        let (src, target) = try makeTransferFixture(tmp)
+        let custom = tmp.appendingPathComponent("reports")
+
+        let placement = ReportPlacement(writeAlongside: true, customDirectory: custom.path)
+        let config = TransferConfig(mode: .copy, algorithm: .xxHash128,
+                                    sources: [src], targets: [target], reportPlacement: placement)
+        let result = await TransferEngine.execute(config: config, onProgress: { _ in })
+        XCTAssertNil(result.errorMessage)
+        XCTAssertEqual(result.reportURLs.count, 4, "两者都选：目标根一组 + 自定义目录一组")
+        let inTarget = result.reportURLs.filter {
+            $0.deletingLastPathComponent().standardizedFileURL.path == target.standardizedFileURL.path
+        }
+        let inCustom = result.reportURLs.filter {
+            $0.deletingLastPathComponent().standardizedFileURL.path == custom.standardizedFileURL.path
+        }
+        XCTAssertEqual(inTarget.count, 2)
+        XCTAssertEqual(inCustom.count, 2)
+        let targetMHL = inTarget.first { $0.pathExtension == "mhl" }!
+        let customMHL = inCustom.first { $0.pathExtension == "mhl" }!
+        XCTAssertNotEqual(targetMHL.lastPathComponent, customMHL.lastPathComponent,
+                          "两处报告文件名应不同，便于区分")
     }
 
     // MARK: - 工具
